@@ -51,9 +51,11 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 echo "==> bundling libportaudio"
-install_name_tool -change "$(otool -D "$PORTAUDIO" | tail -1)" \
-  "@rpath/libportaudio.2.dylib" "$PORTAUDIO" 2>/dev/null || true
+# Copy first, then rewrite the copy's own install name (-id) and every
+# reference to it in the executable — never mutate the Homebrew original.
 cp "$PORTAUDIO" "$CONTENTS/Frameworks/"
+install_name_tool -id "@rpath/libportaudio.2.dylib" \
+  "$CONTENTS/Frameworks/libportaudio.2.dylib"
 install_name_tool -change "$PORTAUDIO" "@rpath/libportaudio.2.dylib" "$BIN"
 # The fork's PortAudio backend loads it through librespot-playback as well.
 for dylib in $(otool -L "$BIN" | awk '{print $1}' | grep -E '\.(dylib|so)$' || true); do
