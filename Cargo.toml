@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["apps/player"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# Keep the exact GPUI revision used by Comet while its UI components depend on
+# fork-only backdrop-blur and edge-fade APIs.
+gpui = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a" }
+gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a", features = ["wayland", "x11", "font-kit", "runtime_shaders"] }
+
+# Production will pin the private fork over Git once its frontend API is
+# public: git = "https://github.com/jhoogstraat/spotatui", rev = "...". The
+# path dependency on the sibling checkout is the documented local override
+# for coordinated development until that revision is cut.
+spotatui = { path = "../spotatui", default-features = false, features = ["streaming"] }
