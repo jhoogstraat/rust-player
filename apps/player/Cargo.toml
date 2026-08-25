@@ -6,6 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = "1"
+chrono = "0.4"
+fern = "0.7"
+log = "0.4"
 gpui.workspace = true
 gpui_platform.workspace = true
 player-core.workspace = true

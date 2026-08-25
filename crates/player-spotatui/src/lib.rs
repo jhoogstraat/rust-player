@@ -231,7 +231,7 @@ impl Runtime for SpotatuiPlayer {
         }
     }
 
-    fn shutdown(self) {
+    fn shutdown(&self) {
         if let Some(stage) = self.stage.lock().unwrap().take() {
             let frontend = stage.frontend.lock().unwrap().take();
             if let Some(runtime) = frontend {

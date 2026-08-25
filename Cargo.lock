@@ -5965,8 +5965,12 @@ dependencies = [
 name = "rust-player"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "fern",
  "gpui",
  "gpui_platform",
+ "log",
  "player-core",
  "player-spotatui",
 ]

@@ -198,6 +198,7 @@ pub trait Runtime: Send + Sync + 'static {
     /// later as notices.
     fn command(&self, command: Command) -> bool;
 
-    /// Stop playback and flush state cleanly. Blocks until done.
-    fn shutdown(self);
+    /// Stop playback and flush state cleanly. Blocks until done. Callable
+    /// through a shared handle (the application's quit hook).
+    fn shutdown(&self);
 }

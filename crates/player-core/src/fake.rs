@@ -42,6 +42,7 @@ pub struct FakeRuntime {
     tx: watch::Sender<Snapshot>,
     commands: mpsc::Sender<Command>,
     inner: Arc<Mutex<Inner>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeRuntime {
@@ -54,10 +55,15 @@ impl FakeRuntime {
 
         let publisher_inner = Arc::clone(&inner);
         let publisher_tx = tx.clone();
+        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let publisher_stop = Arc::clone(&stop_flag);
         std::thread::Builder::new()
             .name("player-fake-runtime".into())
             .spawn(move || {
                 loop {
+                    if publisher_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                     match command_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(command) => apply(&publisher_inner, &publisher_tx, command),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -80,6 +86,7 @@ impl FakeRuntime {
             tx,
             commands,
             inner,
+            stop: stop_flag,
         }
     }
 
@@ -229,7 +236,8 @@ impl crate::Runtime for FakeRuntime {
         self.commands.send(command).is_ok()
     }
 
-    fn shutdown(self) {
-        // Dropping the command sender stops the publisher thread.
+    fn shutdown(&self) {
+        // End the publisher thread; the process is on its way out.
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
