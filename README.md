@@ -1,11 +1,19 @@
 # Rust Player
 
-A minimal native Rust music-player experiment combining Comet's GPUI approach
-with Spotatui's Spotify and native-playback foundation.
+A small native macOS music player: a GPUI window over Spotify's catalog with
+native audio playback, built on a private Spotatui fork. No terminal, no
+Spotify desktop client.
 
-This repository currently contains a compile-tested UI shell. The play button
-deliberately changes only local UI state: the fork's `frontend` runtime
-module (a later milestone) is what will let this view drive real playback.
+## Layout
+
+- `crates/player-core` — the source-neutral contract (snapshot, commands,
+  runtime trait), a scripted fake runtime, and progress projection. Depends on
+  nothing heavier than `tokio::sync`.
+- `crates/player-spotatui` — adapter mapping the contract onto the fork's
+  `frontend` module. No playback logic.
+- `apps/player` — the GPUI application. Never imports the fork.
+- The Spotatui fork is consumed from a sibling checkout at `../spotatui`
+  (path override documented in `Cargo.toml`; production pins it over Git).
 
 ## Prerequisites
 
@@ -13,11 +21,17 @@ module (a later milestone) is what will let this view drive real playback.
 brew install pkgconf portaudio
 ```
 
-Spotatui is built here with `streaming` unconditionally on, which selects
-librespot's PortAudio backend on macOS via `pkg-config`. Without `pkgconf`
-installed, `cargo check` fails clearly during the native feature's build
-script with a `pkg-config` / `portaudio` not-found error rather than a linker
-error deep in the build; that failure *is* the readiness check.
+Spotatui is built with `streaming` unconditionally on, which selects
+librespot's PortAudio backend via `pkg-config`; without `pkgconf`, `cargo
+check` fails clearly in that build script — that failure *is* the readiness
+check.
+
+## Run
+
+```sh
+cargo run -- --fake   # scripted runtime: no credentials, no audio hardware
+cargo run             # real runtime; data root ~/Library/Application Support/rust-player
+```
 
 ## Checks
 
@@ -25,15 +39,14 @@ error deep in the build; that failure *is* the readiness check.
 cargo fmt --check
 cargo check
 cargo test
-cargo run
 ```
 
-The workspace consumes Spotatui through a sibling checkout of the private
-fork at `../spotatui` (a path override documented in `Cargo.toml`).
-Production pins the fork over Git at an exact revision once its `frontend`
-API is public; the path dependency is only the local-development
-convenience.
+## Package (macOS)
+
+```sh
+scripts/package_app.sh          # unsigned .app with PortAudio bundled
+docs/SMOKE_TEST.md              # the manual Premium-account pass
+```
 
 See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the
-authoritative roadmap. [docs/FEASIBILITY.md](docs/FEASIBILITY.md) preserves the
-initial integration evidence.
+authoritative roadmap and [CONTEXT.md](CONTEXT.md) for domain language.
