@@ -5003,6 +5003,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "player-core"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "player-spotatui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "player-core",
+ "spotatui",
+ "tokio",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5949,7 +5967,8 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
- "spotatui",
+ "player-core",
+ "player-spotatui",
 ]
 
 [[package]]

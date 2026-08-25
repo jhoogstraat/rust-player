@@ -1,12 +1,13 @@
 [package]
-name = "rust-player"
+name = "player-spotatui"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-gpui.workspace = true
-gpui_platform.workspace = true
+anyhow = "1"
+log = "0.4"
+tokio.workspace = true
+spotatui.workspace = true
 player-core.workspace = true
-player-spotatui.workspace = true

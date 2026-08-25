@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/player"]
+members = ["crates/player-core", "crates/player-spotatui", "apps/player"]
 
 [workspace.package]
 edition = "2024"
@@ -13,8 +13,13 @@ publish = false
 gpui = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a" }
 gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a", features = ["wayland", "x11", "font-kit", "runtime_shaders"] }
 
+player-core = { path = "crates/player-core" }
+player-spotatui = { path = "crates/player-spotatui" }
+
 # Production will pin the private fork over Git once its frontend API is
 # public: git = "https://github.com/jhoogstraat/spotatui", rev = "...". The
 # path dependency on the sibling checkout is the documented local override
 # for coordinated development until that revision is cut.
 spotatui = { path = "../spotatui", default-features = false, features = ["streaming"] }
+
+tokio = { version = "1", default-features = false, features = ["sync"] }
