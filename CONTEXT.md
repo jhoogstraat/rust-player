@@ -9,6 +9,10 @@ choose where it plays.
 A provider of browsable music and the capabilities available for interacting with it. Spotify is the first Music Source, not the definition of one.
 _Avoid_: Streaming service, provider, backend
 
+**Playback Engine**:
+This product's own in-process runtime: sign-in/session, Native Playback through librespot, catalog fetching, Playback Session state, and persistence behind player-core's Runtime interface.
+_Avoid_: Spotatui, the fork, spotatui fork
+
 **Active Music Source**:
 The Music Source currently selected for browsing and search.
 _Avoid_: Current provider, selected service
