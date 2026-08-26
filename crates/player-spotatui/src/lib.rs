@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Instant;
 
 use tokio::sync::watch;
 
@@ -14,7 +13,7 @@ use player_core::{
     AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Notice, Playable,
     PlaybackStatus, Runtime, SearchState, Snapshot, Source,
 };
-use spotatui::frontend::{self, Action, ActionOutcome, LibraryTarget, Onboarding};
+use spotatui::frontend::{self, ActionOutcome, EngineAction, LibraryTarget, Onboarding};
 
 /// Boot inputs for the real runtime.
 #[derive(Debug, Clone)]
@@ -238,12 +237,12 @@ impl Runtime for SpotatuiPlayer {
             }
             Command::Search(query) => {
                 *self.last_query.lock().unwrap() = Some(query.clone());
-                self.with_frontend(|runtime| runtime.apply(Action::SearchActiveSource(query)))
+                self.with_frontend(|runtime| runtime.apply(EngineAction::SearchActiveSource(query)))
                     .is_some()
             }
             Command::Reauthenticate => {
                 let staged = self
-                    .with_frontend(|runtime| runtime.apply(Action::BeginSpotifyLogin))
+                    .with_frontend(|runtime| runtime.apply(EngineAction::BeginSpotifyLogin))
                     .is_some();
                 // Before a successful boot the only re-login is another boot.
                 staged
@@ -268,10 +267,10 @@ impl Runtime for SpotatuiPlayer {
 
                 self.with_frontend(|runtime| match section {
                     LibrarySection::LikedSongs => {
-                        runtime.apply(Action::OpenLibrary(LibraryTarget::LikedSongs))
+                        runtime.apply(EngineAction::OpenLibrary(LibraryTarget::LikedSongs))
                     }
                     LibrarySection::RecentlyPlayed => {
-                        runtime.apply(Action::OpenLibrary(LibraryTarget::RecentlyPlayed))
+                        runtime.apply(EngineAction::OpenLibrary(LibraryTarget::RecentlyPlayed))
                     }
                     // No playlist LibraryTarget exists; startup already
                     // dispatches GetPlaylists and the snapshot relays it.
@@ -327,27 +326,27 @@ fn publish(tx: &watch::Sender<Snapshot>, next: Snapshot) {
 
 fn dispatch_command(runtime: &frontend::Runtime, command: Command) {
     let action = match command {
-        Command::Play(playable) => Action::PlayUris {
+        Command::Play(playable) => EngineAction::PlayUris {
             uris: vec![playable.locator],
             offset: None,
         },
-        Command::Pause => Action::Pause,
-        Command::Resume => Action::Play,
+        Command::Pause => EngineAction::Pause,
+        Command::Resume => EngineAction::Play,
         Command::Seek(position_ms) => {
-            Action::SeekTo(u32::try_from(position_ms).unwrap_or(u32::MAX))
+            EngineAction::SeekTo(u32::try_from(position_ms).unwrap_or(u32::MAX))
         }
-        Command::Next => Action::NextTrack,
-        Command::Previous => Action::PreviousTrack,
-        Command::SetVolume(percent) => Action::SetVolume(percent.min(100)),
-        Command::Enqueue(playable) => Action::EnqueueNative(track_info(&playable)),
-        Command::RemoveQueued(index) => Action::RemoveNativeQueued(index),
-        Command::MoveQueued { index, up } => Action::MoveNativeQueued { index, up },
-        Command::ClearQueue => Action::ClearNativeQueue,
+        Command::Next => EngineAction::NextTrack,
+        Command::Previous => EngineAction::PreviousTrack,
+        Command::SetVolume(percent) => EngineAction::SetVolume(percent.min(100)),
+        Command::Enqueue(playable) => EngineAction::EnqueueNative(track_info(&playable)),
+        Command::RemoveQueued(index) => EngineAction::RemoveNativeQueued(index),
+        Command::MoveQueued { index, up } => EngineAction::MoveNativeQueued { index, up },
+        Command::ClearQueue => EngineAction::ClearNativeQueue,
         // The fork has no dedicated dismiss. An error notice blocks plain
         // notifications, so overwrite it as an *error* with an empty message
         // and the minimum TTL: `map_snapshot` drops empty notices at once and
         // the fork expires it on its next tick.
-        Command::DismissNotice => Action::NotifyError(String::new(), 0),
+        Command::DismissNotice => EngineAction::NotifyError(String::new(), 0),
         Command::Search(_)
         | Command::SubmitPastedLoginUrl(_)
         | Command::Reauthenticate
@@ -557,7 +556,6 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
 }
 
 fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot {
-    let now = Instant::now();
     // An empty notice is a dismissal in flight (see `dispatch_command`),
     // never a message — and never an error either.
     let notice = fork
@@ -606,7 +604,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
             playable: playable_from_track(state.track.as_ref()?)?,
             is_playing: state.is_playing,
             position_ms: fork.position_ms.unwrap_or(state.progress_ms),
-            observed_at: now,
+            observed_at: fork.as_of,
             volume_percent: state.volume_percent,
         })
     });
