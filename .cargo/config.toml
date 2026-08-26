@@ -1,0 +1,6 @@
+[net]
+git-fetch-with-cli = true
+
+# The engine's upstream repo carries a `spotatui.wiki` git submodule pointing
+# at a third-party wiki that no longer exists (LargeModGames/spotatui.wiki).
+# Nothing in the crate builds from it; skip fetching submodules entirely.
