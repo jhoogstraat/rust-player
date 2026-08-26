@@ -34,8 +34,16 @@ A piece of source-owned content resolved far enough that a Playback Session can 
 _Avoid_: Track, media item, song
 
 **Playback Session**:
-The listener's current playback activity, including its active Playable, queue, transport state, and Playback Device.
+The listener's current playback activity, including its active Playable, queue, transport state, and Playback Device. The engine folds it from typed events; the window projects its moving position locally between snapshots.
 _Avoid_: Player, playback state, audio session
+
+**Event Spine**:
+The engine's typed event stream that carries every runtime mutation (playback events, API responses, auth transitions, timers); one fold task consumes it and publishes snapshots.
+_Avoid_: Tick loop, polling loop, change bell
+
+**Tick Loop**:
+A periodic heartbeat that wakes the runtime whether or not anything changed. Rejected for this product: every time-based behavior is instead an explicit event, timer, or animation frame.
+_Avoid_: Heartbeat, poll interval, frame loop
 
 **Queue**:
 An ordered sequence of source-scoped Playables scheduled within a Playback Session. A Queue may contain Playables from different Music Sources.
