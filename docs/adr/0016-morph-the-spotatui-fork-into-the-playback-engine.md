@@ -45,3 +45,19 @@ snapshots. ADR 0015's path-dependency pin remains in force only until stage 4.
 - **Big-bang rewrite**: rejected in favour of four independently shippable
   stages, each compiling against the running app, with a measurement gate after
   the event spine lands.
+
+
+## Outcome (27 August 2026)
+
+All stages landed. Merged engine PRs: #1 delete terminal UI, #2 presentation
+state, #3 tick-era config keys, #4 Event Spine + EngineCommand, #5
+event-driven position publication + `Snapshot.as_of`, #6 AuthState domain,
+#7 streaming recovery decision seam, #8 catalog stale-visibility contract,
+#9 persistence save-policy seam, #10 boot-options tick-rate retirement, #11
+wiki-submodule removal (required for Git fetches). App PRs: #1 delta-gated
+notify + play-state position pump, #2 the Git pin replacing the path
+dependency.
+
+Measurement gate: release-build idle CPU ~0.48% (was 1.0-2.4% before the
+morph), debug-build idle ~0.5-1.1% depending on network retries in-window.
+Log evidence shows idle windows with zero snapshot publications.
