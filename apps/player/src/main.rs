@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
     SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
-    div, hsla, prelude::*, px, relative, rgb, rgba,
+    div, hsla, prelude::*, px, relative, rgb,
 };
 use player_core::{Command, LibraryState, LoginState, Runtime, SearchState, Snapshot, fake::FakeRuntime};
 use player_spotatui::ConnectOptions;
@@ -36,10 +36,10 @@ pub(crate) const ACCENT: u32 = 0x4f46e5;
 /// blurs only under KWin, X11 not at all), so chrome stays fully opaque there.
 const GLASS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// Surface tone `color` thinned to `alpha` where glass is active; opaque
-/// platforms keep full coverage so their look is unchanged.
+/// Surface tone from a 24-bit `0xRRGGBB` color, thinned to `alpha` where glass
+/// is active; opaque platforms keep full coverage so their look is unchanged.
 pub(crate) fn tone(color: u32, alpha: f32) -> Hsla {
-    Hsla::from(rgba(color)).opacity(if GLASS { alpha } else { 1.0 })
+    Hsla::from(rgb(color)).opacity(if GLASS { alpha } else { 1.0 })
 }
 
 /// Hairline that reads over an unpredictable blurred backdrop.
@@ -946,4 +946,21 @@ fn main() {
         open_player_window(cx);
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tone_preserves_rgb_and_requested_alpha() {
+        let actual = tone(BG, 0.80).to_rgb();
+        let expected = rgb(BG);
+        let expected_alpha = if GLASS { 0.80 } else { 1.0 };
+
+        assert!((actual.r - expected.r).abs() < f32::EPSILON);
+        assert!((actual.g - expected.g).abs() < f32::EPSILON);
+        assert!((actual.b - expected.b).abs() < f32::EPSILON);
+        assert!((actual.a - expected_alpha).abs() < f32::EPSILON);
+    }
 }
