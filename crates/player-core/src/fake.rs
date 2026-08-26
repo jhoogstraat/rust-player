@@ -9,30 +9,102 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use crate::{AudioState, Command, LoginState, Playable, PlaybackStatus, SearchState, Snapshot};
+use crate::{
+    AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Playable,
+    PlaybackStatus, SearchState, Snapshot,
+};
 
 /// How long a scripted search stays in `Loading` so the state is visible.
 const SEARCH_DELAY: Duration = Duration::from_millis(150);
 
+fn canned_track(name: &str, artist: &str, album: &str, duration_ms: u64, id: &str) -> Playable {
+    Playable {
+        source: crate::Source::Spotify,
+        locator: format!("spotify:track:{id}"),
+        title: name.to_string(),
+        artists: vec![artist.to_string()],
+        album: album.to_string(),
+        duration_ms,
+    }
+}
+
 fn canned_results() -> Vec<Playable> {
     vec![
-        Playable {
-            source: crate::Source::Spotify,
-            locator: "spotify:track:4uLU6hMCjMI75M1A2tKUQC".to_string(),
-            title: "Mr. Blue Sky".to_string(),
-            artists: vec!["Electric Light Orchestra".to_string()],
-            album: "Out of the Blue".to_string(),
-            duration_ms: 302_000,
-        },
-        Playable {
-            source: crate::Source::Spotify,
-            locator: "spotify:track:6Y2SdcH4DoWU1RdBFRxNPL".to_string(),
-            title: "Dreamweaver".to_string(),
-            artists: vec!["The Scripted Fake".to_string()],
-            album: "Test Signals".to_string(),
-            duration_ms: 214_000,
-        },
+        canned_track(
+            "Mr. Blue Sky",
+            "Electric Light Orchestra",
+            "Out of the Blue",
+            302_000,
+            "4uLU6hMCjMI75M1A2tKUQC",
+        ),
+        canned_track(
+            "Dreamweaver",
+            "The Scripted Fake",
+            "Test Signals",
+            214_000,
+            "6Y2SdcH4DoWU1RdBFRxNPL",
+        ),
     ]
+}
+
+/// Canned rows per library section; the scripted library is static.
+fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
+    // "Recently played" rows carry real Unix-millis stamps so relative-time
+    // rendering has something truthful to chew on.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    match section {
+        LibrarySection::LikedSongs => canned_results()
+            .into_iter()
+            .chain([
+                canned_track(
+                    "Nightdrive",
+                    "Neon Script",
+                    "Chrome Hours",
+                    256_000,
+                    "3nL9wCcKvOo7VpQ0fake01",
+                ),
+                canned_track(
+                    "Slow Tide",
+                    "Harbor Lights",
+                    "Undertow",
+                    198_000,
+                    "3nL9wCcKvOo7VpQ0fake02",
+                ),
+            ])
+            .map(|playable| LibraryEntry::Track {
+                playable,
+                played_at_ms: None,
+            })
+            .collect(),
+        LibrarySection::RecentlyPlayed => canned_results()
+            .into_iter()
+            .enumerate()
+            .map(|(i, playable)| LibraryEntry::Track {
+                played_at_ms: Some(now_ms.saturating_sub((i as u64 + 1) * 3_600_000)),
+                playable,
+            })
+            .collect(),
+        LibrarySection::Playlists => vec![
+            LibraryEntry::Playlist {
+                id: "fake:playlist:focus".to_string(),
+                name: "Deep Focus".to_string(),
+                track_count: 42,
+            },
+            LibraryEntry::Playlist {
+                id: "fake:playlist:drive".to_string(),
+                name: "Night Drive".to_string(),
+                track_count: 28,
+            },
+            LibraryEntry::Playlist {
+                id: "fake:playlist:discovered".to_string(),
+                name: "Discovered Weekly".to_string(),
+                track_count: 30,
+            },
+        ],
+    }
 }
 
 /// The scripted fake. Commands mutate a plain state struct on one worker
@@ -116,9 +188,21 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
         return;
     }
 
+    if let Command::Browse(section) = command {
+        state.lock().unwrap().library = LibraryState::Loading { section };
+        publish(state, tx);
+        std::thread::sleep(SEARCH_DELAY);
+        state.lock().unwrap().library = LibraryState::Done {
+            section,
+            entries: canned_library(section),
+        };
+        publish(state, tx);
+        return;
+    }
+
     let mut snap = state.lock().unwrap();
     match command {
-        Command::Search(_) => unreachable!("handled above"),
+        Command::Search(_) | Command::Browse(_) => unreachable!("handled above"),
         Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate => {
             snap.login = LoginState::Ready;
         }

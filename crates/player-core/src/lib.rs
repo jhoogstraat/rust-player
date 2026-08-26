@@ -42,6 +42,63 @@ impl Playable {
     }
 }
 
+/// A library section the navigation sidebar can browse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LibrarySection {
+    LikedSongs,
+    RecentlyPlayed,
+    Playlists,
+}
+
+impl LibrarySection {
+    /// Sidebar label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            LibrarySection::LikedSongs => "Liked songs",
+            LibrarySection::RecentlyPlayed => "Recently played",
+            LibrarySection::Playlists => "Playlists",
+        }
+    }
+}
+
+/// One row of a library listing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibraryEntry {
+    Track {
+        playable: Playable,
+        /// When the track was played (Unix millis); `Some` only where the
+        /// section has a time dimension (Recently played).
+        played_at_ms: Option<u64>,
+    },
+    Playlist {
+        /// Opaque source-owned playlist identity.
+        id: String,
+        name: String,
+        track_count: u32,
+    },
+}
+
+/// Catalog lifecycle for the requested library section, mirroring
+/// [`SearchState`]: the visible listing is always replaced by `Loading` or
+/// `Failed` before new rows land, so nothing on screen pretends to be
+/// current. One section is browsed at a time (ADR 0011).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum LibraryState {
+    #[default]
+    Idle,
+    Loading {
+        section: LibrarySection,
+    },
+    Done {
+        section: LibrarySection,
+        entries: Vec<LibraryEntry>,
+    },
+    Failed {
+        section: LibrarySection,
+        message: String,
+    },
+}
+
 /// Sign-in state. `InProgress` covers both browser-consent steps and the
 /// paste-the-redirect-URL fallback; `Expired` offers Reauthenticate.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +170,8 @@ pub struct Snapshot {
     pub playback: Option<PlaybackStatus>,
     /// Upcoming Playables in order.
     pub queue: Vec<Playable>,
+    /// Listing for the section the sidebar last asked to browse.
+    pub library: LibraryState,
     pub audio: AudioState,
     pub notice: Option<Notice>,
 }
@@ -127,6 +186,7 @@ impl Default for Snapshot {
             search: SearchState::Idle,
             playback: None,
             queue: Vec::new(),
+            library: LibraryState::Idle,
             audio: AudioState::Starting,
             notice: None,
         }
@@ -171,6 +231,9 @@ pub enum Command {
     SubmitPastedLoginUrl(String),
     Reauthenticate,
     Search(String),
+    /// Show this sidebar section's listing; the answer arrives as
+    /// `Snapshot::library`.
+    Browse(LibrarySection),
     Play(Playable),
     Pause,
     Resume,

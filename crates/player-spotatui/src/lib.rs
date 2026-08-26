@@ -11,8 +11,8 @@ use std::time::Instant;
 use tokio::sync::watch;
 
 use player_core::{
-    AudioState, Command, LoginState, Notice, Playable, PlaybackStatus, Runtime, SearchState,
-    Snapshot, Source,
+    AudioState, Command, LibraryState, LoginState, Notice, Playable, PlaybackStatus, Runtime,
+    SearchState, Snapshot, Source,
 };
 use spotatui::frontend::{self, Action, Onboarding};
 
@@ -97,6 +97,10 @@ pub struct SpotatuiPlayer {
     /// The query the current search state belongs to; the fork's snapshot
     /// carries results but not the text they answer.
     last_query: Arc<Mutex<Option<String>>>,
+    /// The library listing state the sidebar last requested; the fork exposes
+    /// no library endpoints yet, so it stays a truthful `Failed` until a
+    /// mapping exists.
+    last_library: Arc<Mutex<Option<LibraryState>>>,
     /// Delivers the manual redirect-URL paste to the blocked boot prompt.
     paste_url_tx: mpsc::Sender<String>,
     /// Wakes the boot thread for another attempt after a failed boot.
@@ -115,6 +119,7 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
         tx: tx.clone(),
         frontend: Mutex::new(None),
         last_query: Arc::default(),
+        last_library: Arc::default(),
         paste_url_tx,
         retry_boot_tx,
     });
@@ -186,11 +191,14 @@ impl SpotatuiPlayer {
         let mut rx = runtime.subscribe();
         let relay_tx = self.tx.clone();
         let last_query = Arc::clone(&self.last_query);
+        let last_library = Arc::clone(&self.last_library);
         runtime.handle().spawn(async move {
             loop {
                 let fork_snapshot = rx.borrow_and_update().clone();
                 let query = last_query.lock().unwrap().clone();
-                publish(&relay_tx, map_snapshot(&fork_snapshot, query.as_deref()));
+                let mut snapshot = map_snapshot(&fork_snapshot, query.as_deref());
+                snapshot.library = last_library.lock().unwrap().clone().unwrap_or_default();
+                publish(&relay_tx, snapshot);
                 if rx.changed().await.is_err() {
                     break;
                 }
@@ -238,6 +246,24 @@ impl Runtime for SpotatuiPlayer {
                 staged
                     || (matches!(self.login(), LoginState::Expired { .. })
                         && self.retry_boot_tx.send(()).is_ok())
+            }
+            Command::Browse(section) => {
+                // The fork exposes no library listings yet; report the gap
+                // instead of leaving the section silently empty.
+                let failed = LibraryState::Failed {
+                    section,
+                    message: format!("{} is not available from this source yet.", section.label()),
+                };
+                *self.last_library.lock().unwrap() = Some(failed.clone());
+                let current = self.tx.borrow().clone();
+                publish(
+                    &self.tx,
+                    Snapshot {
+                        library: failed,
+                        ..current
+                    },
+                );
+                true
             }
             other => self
                 .with_frontend(|runtime| dispatch_command(runtime, other))
@@ -289,7 +315,8 @@ fn dispatch_command(runtime: &frontend::Runtime, command: Command) {
         // and the minimum TTL: `map_snapshot` drops empty notices at once and
         // the fork expires it on its next tick.
         Command::DismissNotice => Action::NotifyError(String::new(), 0),
-        Command::Search(_) | Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate => {
+        Command::Search(_) | Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate
+        | Command::Browse(_) => {
             unreachable!("handled in `command`")
         }
     };
@@ -475,6 +502,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
         search,
         playback,
         queue,
+        library: LibraryState::Idle,
         audio,
         notice: notice.map(|message| Notice {
             message: message.to_string(),

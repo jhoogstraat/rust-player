@@ -5,7 +5,10 @@
 //! application's data root. The window renders immutable snapshots and sends
 //! commands; it never sees Spotify, librespot, or Spotatui types.
 
+mod icons;
+mod library;
 mod logging;
+mod sidebar;
 mod text_input;
 
 use std::path::PathBuf;
@@ -17,15 +20,15 @@ use gpui::{
     SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
     div, hsla, prelude::*, px, relative, rgb, rgba,
 };
-use player_core::{Command, LoginState, Runtime, SearchState, Snapshot, fake::FakeRuntime};
+use player_core::{Command, LibraryState, LoginState, Runtime, SearchState, Snapshot, fake::FakeRuntime};
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
 
-const BG: u32 = 0x0c0c0e;
-const PANEL: u32 = 0x18181b;
-const TEXT: u32 = 0xf4f4f5;
-const MUTED: u32 = 0x8b8b91;
-const ACCENT: u32 = 0x4f46e5;
+pub(crate) const BG: u32 = 0x0c0c0e;
+pub(crate) const PANEL: u32 = 0x18181b;
+pub(crate) const TEXT: u32 = 0xf4f4f5;
+pub(crate) const MUTED: u32 = 0x8b8b91;
+pub(crate) const ACCENT: u32 = 0x4f46e5;
 
 /// macOS and Windows composite the window over an OS-blurred backdrop
 /// (`WindowBackgroundAppearance::Blurred`): AppKit vibrancy / DWM composition,
@@ -35,13 +38,20 @@ const GLASS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
 /// Surface tone `color` thinned to `alpha` where glass is active; opaque
 /// platforms keep full coverage so their look is unchanged.
-fn tone(color: u32, alpha: f32) -> Hsla {
+pub(crate) fn tone(color: u32, alpha: f32) -> Hsla {
     Hsla::from(rgba(color)).opacity(if GLASS { alpha } else { 1.0 })
 }
 
 /// Hairline that reads over an unpredictable blurred backdrop.
-fn border() -> Hsla {
+pub(crate) fn border() -> Hsla {
     hsla(0., 0., 1., 0.10)
+}
+
+/// Interactive wash over any surface (Comet's dark-mode wash idiom):
+/// low-alpha white reads as a tinted plate on glass and as a lighter grey
+/// on opaque chrome alike.
+pub(crate) fn wash(alpha: f32) -> Hsla {
+    hsla(0., 0., 1., alpha)
 }
 
 actions!(
@@ -73,6 +83,9 @@ fn data_root() -> PathBuf {
 
 struct PlayerApp {
     snapshot: Snapshot,
+    /// The active sidebar destination; library sections feed the second
+    /// column, Settings swaps the main area.
+    nav: sidebar::NavSection,
     /// Holds focus whenever no text field does, so fixed shortcuts reach
     /// `handle_key` through the root element.
     root_focus: gpui::FocusHandle,
@@ -223,9 +236,30 @@ impl Render for PlayerApp {
                         }),
                     ))),
             )
-            // Body: sign-in replaces the content area until the runtime is ready.
+            // Body: sign-in takes the whole window until the runtime is
+            // ready; then the Comet column layout — fixed sidebar, second
+            // column with the browsed library listing, main area.
             .child(if ready(&snap) {
-                self.render_content(window, cx).into_any_element()
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .overflow_hidden()
+                    .child(sidebar::render_sidebar(self, cx).into_any_element())
+                    .when_some(
+                        self.nav.library(),
+                        |row, section| {
+                            row.child(
+                                library::render_library(self, section, cx).into_any_element(),
+                            )
+                        },
+                    )
+                    .child(if self.nav == sidebar::NavSection::Settings {
+                        self.render_settings().into_any_element()
+                    } else {
+                        self.render_content(window, cx).into_any_element()
+                    })
+                    .into_any_element()
             } else {
                 self.render_sign_in(window, cx).into_any_element()
             })
@@ -323,6 +357,28 @@ fn log_path_label() -> String {
 }
 
 impl PlayerApp {
+    fn render_settings(&self) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .p(px(18.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Settings"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(MUTED))
+                    .child("Nothing to configure yet."),
+            )
+    }
+
     fn render_sign_in(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let message = match &self.snapshot.login {
             LoginState::InProgress { message, .. } => message.clone(),
@@ -791,6 +847,15 @@ fn open_player_window(cx: &mut App) {
                         if this
                             .update(cx, |app: &mut PlayerApp, cx| {
                                 app.snapshot = snapshot;
+                                // First ready snapshot: load the section the
+                                // sidebar opens with, so the second column is
+                                // never a dead "choose a section" hint.
+                                if let Some(section) = app.nav.library()
+                                    && ready(&app.snapshot)
+                                    && matches!(app.snapshot.library, LibraryState::Idle)
+                                {
+                                    app.send(Command::Browse(section));
+                                }
                                 cx.notify();
                             })
                             .is_err()
@@ -820,6 +885,7 @@ fn open_player_window(cx: &mut App) {
 
                 PlayerApp {
                     snapshot: initial_snapshot,
+                    nav: sidebar::NavSection::LikedSongs,
                     root_focus: cx.focus_handle(),
                     search: TextField::new(cx, "Search Spotify…"),
                     paste: TextField::new(cx, "http://127.0.0.1:8989/login?code=…"),
@@ -851,7 +917,7 @@ fn main() {
     };
     let _ = RUNTIME.set(runtime);
 
-    let application = gpui_platform::application();
+    let application = gpui_platform::application().with_assets(icons::Assets);
     application.on_reopen(open_player_window);
     application.run(move |cx: &mut App| {
         // Fixed shortcuts: cmd-based only. Bindings dispatch before key-down

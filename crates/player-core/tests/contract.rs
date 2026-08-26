@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use player_core::{
-    AudioState, Command, LoginState, Playable, PlaybackStatus, Runtime, SearchState, Snapshot,
-    Source, project_position,
+    AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Playable,
+    PlaybackStatus, Runtime, SearchState, Snapshot, Source, project_position,
 };
 
 /// The contract crate itself stays runtime-free; tests drive async watch
@@ -161,6 +161,61 @@ fn search_without_hits_still_reports_done_with_empty_results() {
             other => panic!("expected Done, got {other:?}"),
         }
         drop(done);
+        runtime.shutdown();
+    });
+}
+
+#[test]
+fn fake_runtime_browses_every_library_section() {
+    block_on(async {
+        let runtime = player_core::fake::FakeRuntime::new();
+        let mut rx = runtime.subscribe();
+        assert_eq!(rx.borrow().library, LibraryState::Idle);
+
+        for section in [
+            LibrarySection::LikedSongs,
+            LibrarySection::RecentlyPlayed,
+            LibrarySection::Playlists,
+        ] {
+            assert!(runtime.command(Command::Browse(section)));
+            let loading = rx
+                .wait_for(|snap| {
+                    matches!(snap.library, LibraryState::Loading { section: s } if s == section)
+                })
+                .await
+                .unwrap();
+            assert_eq!(loading.library, LibraryState::Loading { section });
+            drop(loading);
+            let done = rx
+                .wait_for(|snap| {
+                    matches!(snap.library, LibraryState::Done { section: s, .. } if s == section)
+                })
+                .await
+                .unwrap();
+            match &done.library {
+                LibraryState::Done {
+                    section: done_section,
+                    entries,
+                } => {
+                    assert_eq!(*done_section, section);
+                    assert!(!entries.is_empty(), "section {section:?}");
+                    // Track sections carry Playables; the playlists section
+                    // carries playlist rows.
+                    if section == LibrarySection::Playlists {
+                        assert!(entries.iter().all(|e| matches!(
+                            e,
+                            LibraryEntry::Playlist { .. }
+                        )));
+                    } else {
+                        assert!(entries
+                            .iter()
+                            .all(|e| matches!(e, LibraryEntry::Track { .. })));
+                    }
+                }
+                other => panic!("expected Done for {section:?}, got {other:?}"),
+            }
+            drop(done);
+        }
         runtime.shutdown();
     });
 }
