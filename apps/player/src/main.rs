@@ -13,8 +13,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, Context, FontWeight, IntoElement, KeyBinding, ParentElement, Render, SharedString,
-    Styled, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, relative, rgb,
+    App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
+    SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
+    div, hsla, prelude::*, px, relative, rgb, rgba,
 };
 use player_core::{Command, LoginState, Runtime, SearchState, Snapshot, fake::FakeRuntime};
 use player_spotatui::ConnectOptions;
@@ -22,10 +23,26 @@ use text_input::{KeyOutcome, TextField};
 
 const BG: u32 = 0x0c0c0e;
 const PANEL: u32 = 0x18181b;
-const BORDER: u32 = 0x29292d;
 const TEXT: u32 = 0xf4f4f5;
 const MUTED: u32 = 0x8b8b91;
 const ACCENT: u32 = 0x4f46e5;
+
+/// macOS and Windows composite the window over an OS-blurred backdrop
+/// (`WindowBackgroundAppearance::Blurred`): AppKit vibrancy / DWM composition,
+/// both guaranteed by the platform. Linux has no compositor guarantee (Wayland
+/// blurs only under KWin, X11 not at all), so chrome stays fully opaque there.
+const GLASS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// Surface tone `color` thinned to `alpha` where glass is active; opaque
+/// platforms keep full coverage so their look is unchanged.
+fn tone(color: u32, alpha: f32) -> Hsla {
+    Hsla::from(rgba(color)).opacity(if GLASS { alpha } else { 1.0 })
+}
+
+/// Hairline that reads over an unpredictable blurred backdrop.
+fn border() -> Hsla {
+    hsla(0., 0., 1., 0.10)
+}
 
 actions!(
     player,
@@ -175,7 +192,7 @@ impl Render for PlayerApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(BG))
+            .bg(tone(BG, 0.80))
             .text_color(rgb(TEXT))
             // Header
             .child(
@@ -186,7 +203,7 @@ impl Render for PlayerApp {
                     .justify_between()
                     .px(px(18.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(border())
                     .child(
                         div()
                             .text_size(px(13.))
@@ -217,9 +234,9 @@ impl Render for PlayerApp {
                 div()
                     .px(px(18.))
                     .py(px(6.))
-                    .bg(rgb(PANEL))
+                    .bg(tone(PANEL, 0.60))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(border())
                     .flex()
                     .items_center()
                     .justify_between()
@@ -251,7 +268,7 @@ impl Render for PlayerApp {
                     .gap(px(8.))
                     .px(px(18.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(border())
                     .child(button(
                         "toggle",
                         if snap.is_playing() { "Pause" } else { "Play" },
@@ -326,9 +343,9 @@ impl PlayerApp {
                 .w(px(520.))
                 .p(px(28.))
                 .rounded(px(14.))
-                .bg(rgb(PANEL))
+                .bg(tone(PANEL, 0.60))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(border())
                 .flex()
                 .flex_col()
                 .gap(px(16.))
@@ -411,12 +428,12 @@ impl PlayerApp {
                             .px(px(18.))
                             .py(px(8.))
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(border())
                             .flex()
                             .items_center()
                             .justify_between()
                             .cursor_pointer()
-                            .hover(|style| style.bg(rgb(PANEL)))
+                            .hover(|style| style.bg(tone(PANEL, 0.60)))
                             .on_click(cx.listener(move |app, _, _, _| {
                                 app.send(Command::Play(play.clone()));
                             }))
@@ -443,7 +460,7 @@ impl PlayerApp {
                                             .py(px(3.))
                                             .rounded(px(5.))
                                             .border_1()
-                                            .border_color(rgb(BORDER))
+                                            .border_color(border())
                                             .text_size(px(11.))
                                             .cursor_pointer()
                                             .hover(|style| style.bg(rgb(ACCENT)))
@@ -514,7 +531,7 @@ impl PlayerApp {
                                 .flex()
                                 .flex_col()
                                 .border_l_1()
-                                .border_color(rgb(BORDER))
+                                .border_color(border())
                                 .child(
                                     div()
                                         .px(px(14.))
@@ -537,7 +554,7 @@ impl PlayerApp {
                                         .px(px(14.))
                                         .py(px(7.))
                                         .border_t_1()
-                                        .border_color(rgb(BORDER))
+                                        .border_color(border())
                                         .flex()
                                         .items_center()
                                         .justify_between()
@@ -613,13 +630,13 @@ impl PlayerApp {
 
         div()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(border())
             .flex()
             .flex_col()
             .child(
                 div()
                     .h(px(3.))
-                    .bg(rgb(0x232328))
+                    .bg(tone(0x232328, 0.75))
                     .child(div().h_full().w(relative(progress)).bg(rgb(ACCENT))),
             )
             .child(
@@ -668,11 +685,11 @@ fn status_row_with_retry(text: String, query: String, cx: &Context<PlayerApp>) -
                 .py(px(3.))
                 .rounded(px(5.))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(border())
                 .text_size(px(11.))
                 .text_color(rgb(TEXT))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(PANEL)))
+                .hover(|style| style.bg(tone(PANEL, 0.60)))
                 .on_click(cx.listener(move |app, _, _, _| {
                     app.send(Command::Search(query.clone()));
                 }))
@@ -697,12 +714,12 @@ fn button(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(PANEL))
+        .bg(tone(PANEL, 0.60))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(border())
         .text_size(px(12.))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(0x232328)))
+        .hover(|style| style.bg(tone(0x232328, 0.75)))
         .on_click(handler)
         .child(label.into())
 }
@@ -718,10 +735,10 @@ fn small_button(
         .py(px(2.))
         .rounded(px(4.))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(border())
         .text_size(px(11.))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(PANEL)))
+        .hover(|style| style.bg(tone(PANEL, 0.60)))
         .on_click(handler)
         .child(label)
 }
@@ -738,6 +755,29 @@ fn open_player_window(cx: &mut App) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(gpui::size(px(620.), px(440.))),
+            // Frosted shell: the desktop shows through blurred behind the
+            // translucent chrome (`tone`). Gate matches platforms whose
+            // compositor *guarantees* blur in this gpui pin — macOS installs
+            // an NSVisualEffectView, Windows drives DWM composition. Linux is
+            // deliberately conservative: Wayland blurs only under KWin's
+            // org_kde_kwin_blur and X11 gets no blur at all, so it stays
+            // opaque rather than showing raw desktop through 80%-alpha chrome.
+            //
+            // THEME-SWITCH REQUIREMENT: if a future theme/appearance switcher
+            // can change the palette at runtime, it MUST re-push this value
+            // via `window.set_background_appearance(...)` after every change,
+            // unconditionally. gpui's macOS backend tears the
+            // NSVisualEffectView out of the window the moment the value is
+            // anything but Blurred and nothing reinstates it on its own — a
+            // single missed re-apply kills vibrancy until restart. Comet runs
+            // this loop on every appearance change
+            // (crates/ui/src/appearance.rs `apply` + `reapply_window_background`),
+            // as does zed's main.rs.
+            window_background: if GLASS {
+                WindowBackgroundAppearance::Blurred
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
             app_id: Some("rust-player".into()),
             ..Default::default()
         },

@@ -7,7 +7,6 @@ use gpui::{
     px, rgb,
 };
 
-const BORDER: u32 = 0x2d2d32;
 const MUTED: u32 = 0x8b8b91;
 
 /// What one keystroke did to a field.
@@ -133,8 +132,8 @@ impl TextField {
             .px(px(10.))
             .rounded(px(7.))
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(0x111114))
+            .border_color(crate::border())
+            .bg(crate::tone(0x111114, 0.50))
             .flex()
             .items_center()
             .text_size(px(13.))
