@@ -99,14 +99,30 @@ fn fake_runtime_answers_commands_with_snapshots() {
         assert_eq!(rx.borrow().login, LoginState::Ready);
 
         assert!(runtime.command(Command::Search("blue".to_string())));
-        rx.changed().await.unwrap();
-        match &rx.borrow().search {
+        // Loading is published first and stays visible long enough to see.
+        let loading = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Loading { .. }))
+            .await
+            .unwrap();
+        assert_eq!(
+            loading.search,
+            SearchState::Loading {
+                query: "blue".to_string()
+            }
+        );
+        drop(loading);
+        let done = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Done { .. }))
+            .await
+            .unwrap();
+        match &done.search {
             SearchState::Done { results, .. } => {
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0].title, "Mr. Blue Sky");
             }
             other => panic!("expected Done, got {other:?}"),
         }
+        drop(done);
 
         runtime.command(Command::Play(playable()));
         rx.changed().await.unwrap();
@@ -136,11 +152,15 @@ fn search_without_hits_still_reports_done_with_empty_results() {
         let mut rx = runtime.subscribe();
 
         runtime.command(Command::Search("zzzz-no-match".to_string()));
-        rx.changed().await.unwrap();
-        match &rx.borrow().search {
+        let done = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Done { .. }))
+            .await
+            .unwrap();
+        match &done.search {
             SearchState::Done { results, .. } => assert!(results.is_empty()),
             other => panic!("expected Done, got {other:?}"),
         }
+        drop(done);
         runtime.shutdown();
     });
 }

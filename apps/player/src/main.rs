@@ -18,7 +18,7 @@ use gpui::{
 };
 use player_core::{Command, LoginState, Runtime, SearchState, Snapshot, fake::FakeRuntime};
 use player_spotatui::ConnectOptions;
-use text_input::TextField;
+use text_input::{KeyOutcome, TextField};
 
 const BG: u32 = 0x0c0c0e;
 const PANEL: u32 = 0x18181b;
@@ -31,7 +31,6 @@ actions!(
     player,
     [
         FocusSearch,
-        TogglePlay,
         NextTrack,
         PreviousTrack,
         VolumeUp,
@@ -57,6 +56,9 @@ fn data_root() -> PathBuf {
 
 struct PlayerApp {
     snapshot: Snapshot,
+    /// Holds focus whenever no text field does, so fixed shortcuts reach
+    /// `handle_key` through the root element.
+    root_focus: gpui::FocusHandle,
     search: TextField,
     paste: TextField,
     queue_open: bool,
@@ -64,7 +66,10 @@ struct PlayerApp {
 
 impl PlayerApp {
     fn send(&self, command: Command) {
-        RUNTIME.get().expect("runtime").command(command);
+        let runtime = RUNTIME.get().expect("runtime");
+        if !runtime.command(command.clone()) {
+            log::warn!("[ui] runtime rejected {command:?}");
+        }
     }
 
     /// Route a keystroke: whichever text field has focus edits itself and may
@@ -75,40 +80,36 @@ impl PlayerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let search_focused = self.search.focus.is_focused(window);
-        let paste_focused = self.paste.focus.is_focused(window);
+        let focused_field = if self.search.focus.is_focused(window) {
+            Some(true)
+        } else if self.paste.focus.is_focused(window) {
+            Some(false)
+        } else {
+            None
+        };
 
-        if search_focused || paste_focused {
-            let was_search = search_focused;
-            // Scope the field borrow before sending commands.
-            let submitted = {
-                let field = if search_focused {
-                    &mut self.search
-                } else {
-                    &mut self.paste
-                };
-                match field.key(event) {
-                    Some(true) => {
-                        let value = field.value.trim().to_string();
-                        field.clear();
-                        Some(value)
-                    }
-                    Some(false) => {
-                        cx.notify();
-                        None
-                    }
-                    None => None,
-                }
+        if let Some(is_search) = focused_field {
+            let field = if is_search {
+                &mut self.search
+            } else {
+                &mut self.paste
             };
-            if let Some(value) = submitted {
-                if !value.is_empty() {
-                    if was_search {
-                        self.send(Command::Search(value));
-                    } else {
-                        self.send(Command::SubmitPastedLoginUrl(value));
+            match field.key(event) {
+                KeyOutcome::Submitted => {
+                    let value = field.value.trim().to_string();
+                    field.clear();
+                    if !value.is_empty() {
+                        self.send(if is_search {
+                            Command::Search(value)
+                        } else {
+                            Command::SubmitPastedLoginUrl(value)
+                        });
                     }
+                    cx.notify();
                 }
-                cx.notify();
+                KeyOutcome::Edited => cx.notify(),
+                KeyOutcome::Blur => window.focus(&self.root_focus, cx),
+                KeyOutcome::Ignored => {}
             }
             return;
         }
@@ -122,26 +123,29 @@ impl PlayerApp {
             }),
             "n" => self.send(Command::Next),
             "p" => self.send(Command::Previous),
-            "+" | "=" => {
-                let v = current_volume(&self.snapshot);
-                self.send(Command::SetVolume((v + 10).min(100)));
-            }
-            "-" => {
-                let v = current_volume(&self.snapshot);
-                self.send(Command::SetVolume(v.saturating_sub(10)));
-            }
+            "+" | "=" => self.send(volume_command(&self.snapshot, 10)),
+            "-" => self.send(volume_command(&self.snapshot, -10)),
             "/" => window.focus(&self.search.focus, cx),
             _ => {}
         }
     }
 }
 
-fn current_volume(snapshot: &Snapshot) -> u8 {
-    snapshot
+/// Step the volume by `delta` percent from the last reported level (80 until
+/// the runtime reports one), clamped to 0–100.
+fn volume_command(snapshot: &Snapshot, delta: i16) -> Command {
+    let current = snapshot
         .playback
         .as_ref()
         .and_then(|p| p.volume_percent)
-        .unwrap_or(80)
+        .unwrap_or(80);
+    Command::SetVolume((i16::from(current) + delta).clamp(0, 100) as u8)
+}
+
+/// `m:ss` for a millisecond count.
+fn clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 impl Render for PlayerApp {
@@ -151,29 +155,18 @@ impl Render for PlayerApp {
         div()
             .id("root")
             .key_context("Player")
-            .track_focus(&cx.focus_handle())
+            .track_focus(&self.root_focus)
             .on_key_down(cx.listener(Self::handle_key))
             .on_action(cx.listener(|app, _: &FocusSearch, window, cx| {
                 window.focus(&app.search.focus, cx);
             }))
-            .on_action(cx.listener(|app, _: &TogglePlay, _, _| {
-                app.send(if app.snapshot.is_playing() {
-                    Command::Pause
-                } else {
-                    Command::Resume
-                });
-            }))
             .on_action(cx.listener(|app, _: &NextTrack, _, _| app.send(Command::Next)))
             .on_action(cx.listener(|app, _: &PreviousTrack, _, _| app.send(Command::Previous)))
             .on_action(cx.listener(|app, _: &VolumeUp, _, _| {
-                app.send(Command::SetVolume(
-                    (current_volume(&app.snapshot) + 10).min(100),
-                ));
+                app.send(volume_command(&app.snapshot, 10));
             }))
             .on_action(cx.listener(|app, _: &VolumeDown, _, _| {
-                app.send(Command::SetVolume(
-                    current_volume(&app.snapshot).saturating_sub(10),
-                ));
+                app.send(volume_command(&app.snapshot, -10));
             }))
             .on_action(cx.listener(|app, _: &ToggleQueuePanel, _, cx| {
                 app.queue_open = !app.queue_open;
@@ -217,7 +210,7 @@ impl Render for PlayerApp {
             .child(if ready(&snap) {
                 self.render_content(window, cx).into_any_element()
             } else {
-                self.render_sign_in(window).into_any_element()
+                self.render_sign_in(window, cx).into_any_element()
             })
             // Notice bar
             .children(snap.notice.as_ref().map(|notice| {
@@ -232,7 +225,7 @@ impl Render for PlayerApp {
                     .justify_between()
                     .text_size(px(12.))
                     .text_color(rgb(MUTED))
-                    .child(format!("{}", notice.message))
+                    .child(notice.message.clone())
                     .when(notice.dismissible, |el| {
                         el.child(
                             div()
@@ -283,20 +276,12 @@ impl Render for PlayerApp {
                     .child(button(
                         "vol-down",
                         "Vol −",
-                        cx.listener(|app, _, _, _| {
-                            app.send(Command::SetVolume(
-                                current_volume(&app.snapshot).saturating_sub(10),
-                            ));
-                        }),
+                        cx.listener(|app, _, _, _| app.send(volume_command(&app.snapshot, -10))),
                     ))
                     .child(button(
                         "vol-up",
                         "Vol +",
-                        cx.listener(|app, _, _, _| {
-                            app.send(Command::SetVolume(
-                                (current_volume(&app.snapshot) + 10).min(100),
-                            ));
-                        }),
+                        cx.listener(|app, _, _, _| app.send(volume_command(&app.snapshot, 10))),
                     ))
                     .child(div().flex_1())
                     .child(
@@ -321,7 +306,7 @@ fn log_path_label() -> String {
 }
 
 impl PlayerApp {
-    fn render_sign_in(&self, window: &Window) -> impl IntoElement {
+    fn render_sign_in(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let message = match &self.snapshot.login {
             LoginState::InProgress { message, .. } => message.clone(),
             LoginState::Expired { message } => message.clone(),
@@ -402,6 +387,7 @@ impl PlayerApp {
                             .text_size(px(13.))
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x6366f1)))
+                            .on_click(cx.listener(|app, _, _, _| app.send(Command::Reauthenticate)))
                             .child("Reauthenticate"),
                     )
                 }),
@@ -557,13 +543,10 @@ impl PlayerApp {
                                         .justify_between()
                                         .text_size(px(12.))
                                         .child(div().flex_1().overflow_hidden().child(format!(
-                                            "{}. {}",
+                                            "{}. {} — {}",
                                             i + 1,
-                                            format!(
-                                                "{} — {}",
-                                                playable.title,
-                                                playable.artists_display()
-                                            )
+                                            playable.title,
+                                            playable.artists_display()
                                         )))
                                         .child(
                                             div()
@@ -649,13 +632,7 @@ impl PlayerApp {
                     .child(div().text_size(px(12.)).overflow_hidden().child(title_line))
                     .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
                         if duration_ms > 0 {
-                            format!(
-                                "{:.1}:{:05.1} / {:.1}:{:05.1}",
-                                position_ms / 60000,
-                                (position_ms % 60000) as f64 / 1000.0,
-                                duration_ms / 60000,
-                                (duration_ms % 60000) as f64 / 1000.0
-                            )
+                            format!("{} / {}", clock(position_ms), clock(duration_ms))
                         } else {
                             String::new()
                         },
@@ -764,9 +741,9 @@ fn open_player_window(cx: &mut App) {
             app_id: Some("rust-player".into()),
             ..Default::default()
         },
-        |_, cx| {
+        |window, cx| {
             let mut rx = runtime.subscribe();
-            cx.new(|cx| {
+            let app = cx.new(|cx| {
                 // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
                     loop {
@@ -803,11 +780,16 @@ fn open_player_window(cx: &mut App) {
 
                 PlayerApp {
                     snapshot: initial_snapshot,
+                    root_focus: cx.focus_handle(),
                     search: TextField::new(cx, "Search Spotify…"),
                     paste: TextField::new(cx, "http://127.0.0.1:8989/login?code=…"),
                     queue_open: true,
                 }
-            })
+            });
+            // Shortcuts work from the first frame, before any click.
+            let root_focus = app.read(cx).root_focus.clone();
+            window.focus(&root_focus, cx);
+            app
         },
     )
     .expect("failed to open player window");
@@ -830,15 +812,14 @@ fn main() {
     let _ = RUNTIME.set(runtime);
 
     let application = gpui_platform::application();
-    application.on_reopen(|cx| open_player_window(cx));
+    application.on_reopen(open_player_window);
     application.run(move |cx: &mut App| {
-        // Kept alive for the process lifetime; dropping the subscription
-        // unregisters the quit hook.
-        let _quit_subscription;
-        // Fixed shortcuts (cmd-based so they never collide with text entry).
+        // Fixed shortcuts: cmd-based only. Bindings dispatch before key-down
+        // listeners, so a bare key here (e.g. "space") would fire even while
+        // a text field is focused and never reach the field; bare-key
+        // shortcuts live in `handle_key`, which checks focus first.
         cx.bind_keys([
             KeyBinding::new("cmd-f", FocusSearch, None),
-            KeyBinding::new("space", TogglePlay, Some("Player")),
             KeyBinding::new("cmd-right", NextTrack, None),
             KeyBinding::new("cmd-left", PreviousTrack, None),
             KeyBinding::new("cmd-up", VolumeUp, None),
@@ -846,12 +827,15 @@ fn main() {
             KeyBinding::new("cmd-k", ToggleQueuePanel, None),
         ]);
 
-        // ⌘Q stops playback and flushes state cleanly.
-        _quit_subscription = cx.on_app_quit(move |_cx| async move {
+        // ⌘Q stops playback and flushes state cleanly. A `Subscription`
+        // unregisters its hook on drop, and this closure returns before the
+        // event loop starts, so the hook must be detached to survive.
+        cx.on_app_quit(move |_cx| async move {
             if let Some(runtime) = RUNTIME.get() {
                 runtime.shutdown();
             }
-        });
+        })
+        .detach();
 
         open_player_window(cx);
         cx.activate(true);

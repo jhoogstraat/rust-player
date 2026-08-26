@@ -10,7 +10,20 @@ use gpui::{
 const BORDER: u32 = 0x2d2d32;
 const MUTED: u32 = 0x8b8b91;
 
-/// One editable single-line field.
+/// What one keystroke did to a field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOutcome {
+    /// Enter: the parent takes `value`.
+    Submitted,
+    /// The text or cursor changed; re-render.
+    Edited,
+    /// Escape: the parent should move focus away.
+    Blur,
+    /// Not a text key (command chords, unknown keys); nothing changed.
+    Ignored,
+}
+
+/// One editable single-line field. `cursor` counts characters, not bytes.
 pub struct TextField {
     pub focus: gpui::FocusHandle,
     pub value: String,
@@ -37,73 +50,78 @@ impl TextField {
         self.value.chars().count()
     }
 
-    fn insert(&mut self, ch: &str) {
-        let before: String = self.value.chars().take(self.cursor).collect();
-        let after: String = self.value.chars().skip(self.cursor).collect();
-        self.value = format!("{before}{ch}{after}");
-        self.cursor += ch.chars().count();
+    /// Byte offset of the `chars`-th character (or the end).
+    fn byte_offset(&self, chars: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(chars)
+            .map_or(self.value.len(), |(offset, _)| offset)
     }
 
+    fn insert(&mut self, text: &str) {
+        let at = self.byte_offset(self.cursor);
+        self.value.insert_str(at, text);
+        self.cursor += text.chars().count();
+    }
+
+    /// Remove the character before the cursor.
     fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
         }
-        let before: String = self.value.chars().take(self.cursor - 1).collect();
-        let after: String = self.value.chars().skip(self.cursor).collect();
-        self.value = format!("{before}{after}");
+        let start = self.byte_offset(self.cursor - 1);
+        let end = self.byte_offset(self.cursor);
+        self.value.replace_range(start..end, "");
         self.cursor -= 1;
     }
 
-    /// Handle one keystroke while focused. `Some` means the field was
-    /// submitted (Enter); `false` returns mean the key was not consumed so a
-    /// parent handler can act on it.
-    pub fn key(&mut self, event: &KeyDownEvent) -> Option<bool> {
+    /// Remove the character under the cursor.
+    fn delete(&mut self) {
+        let start = self.byte_offset(self.cursor);
+        let end = self.byte_offset(self.cursor + 1);
+        self.value.replace_range(start..end, "");
+    }
+
+    /// Handle one keystroke while focused.
+    pub fn key(&mut self, event: &KeyDownEvent) -> KeyOutcome {
         let stroke = &event.keystroke;
-        // Modifier-only or command chords never edit text.
+        // Command chords never edit text.
         if stroke.modifiers.platform
             || stroke.modifiers.control
             || stroke.modifiers.alt
             || stroke.modifiers.function
         {
-            return Some(false);
+            return KeyOutcome::Ignored;
         }
         match stroke.key.as_str() {
-            "enter" => return Some(true),
-            "escape" => return None, // let the parent blur
+            "enter" => return KeyOutcome::Submitted,
+            "escape" => return KeyOutcome::Blur,
             "backspace" => self.backspace(),
+            "delete" => self.delete(),
             "left" => self.cursor = self.cursor.saturating_sub(1),
             "right" => self.cursor = (self.cursor + 1).min(self.char_count()),
             "home" => self.cursor = 0,
             "end" => self.cursor = self.char_count(),
-            _ => {
-                // Character entry rides on key_char ("s" → "s", option-s → "ß").
-                if let Some(text) = &stroke.key_char {
-                    for ch in text.chars() {
-                        let before = self.char_count();
-                        self.insert(&ch.to_string());
-                        if self.char_count() == before && !text.is_empty() {
-                            break;
-                        }
-                    }
-                } else {
-                    return Some(false);
+            // Character entry rides on key_char ("s" → "s", option-s → "ß");
+            // control characters (tab, newline) are not text.
+            _ => match stroke.key_char.as_deref() {
+                Some(text) if !text.is_empty() && !text.chars().any(char::is_control) => {
+                    self.insert(text)
                 }
-            }
+                _ => return KeyOutcome::Ignored,
+            },
         }
-        Some(false)
+        KeyOutcome::Edited
     }
 
     /// Render the field with a visible cursor while focused.
     pub fn render(&self, id: &'static str, window: &gpui::Window) -> impl IntoElement + use<> {
         let focused = self.focus.is_focused(window);
-        let display: SharedString = if self.value.is_empty() && !focused {
+        let display: SharedString = if focused {
+            let at = self.byte_offset(self.cursor);
+            format!("{}|{}", &self.value[..at], &self.value[at..]).into()
+        } else if self.value.is_empty() {
             self.placeholder.into()
-        } else if focused {
-            let chars: Vec<char> = self.value.chars().collect();
-            let at = self.cursor.min(chars.len());
-            let head: String = chars[..at].iter().collect();
-            let tail: String = chars[at..].iter().collect();
-            format!("{head}|{tail}").into()
         } else {
             self.value.clone().into()
         };

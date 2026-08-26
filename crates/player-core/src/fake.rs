@@ -2,6 +2,7 @@
 //! hardware. It answers every command the window can send, so UI behavior
 //! is exercisable end to end.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,6 +10,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::{AudioState, Command, LoginState, Playable, PlaybackStatus, SearchState, Snapshot};
+
+/// How long a scripted search stays in `Loading` so the state is visible.
+const SEARCH_DELAY: Duration = Duration::from_millis(150);
 
 fn canned_results() -> Vec<Playable> {
     vec![
@@ -31,71 +35,57 @@ fn canned_results() -> Vec<Playable> {
     ]
 }
 
-struct Inner {
-    snapshot: Snapshot,
-}
-
-/// The scripted fake. Commands mutate a plain state struct and republish;
-/// search resolves to canned results after a short delay so loading state
-/// is visible.
+/// The scripted fake. Commands mutate a plain state struct on one worker
+/// thread and republish; a search shows `Loading` for [`SEARCH_DELAY`]
+/// before resolving to canned results.
 pub struct FakeRuntime {
     tx: watch::Sender<Snapshot>,
     commands: mpsc::Sender<Command>,
-    inner: Arc<Mutex<Inner>>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    state: Arc<Mutex<Snapshot>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl FakeRuntime {
     pub fn new() -> Self {
-        let (tx, _rx) = watch::channel(Snapshot::default());
+        // Land in Ready immediately: the fake has no sign-in step.
+        let initial = Snapshot {
+            login: LoginState::Ready,
+            audio: AudioState::Ready,
+            ..Snapshot::default()
+        };
+        let (tx, _rx) = watch::channel(initial.clone());
         let (commands, command_rx) = mpsc::channel::<Command>();
-        let inner = Arc::new(Mutex::new(Inner {
-            snapshot: Snapshot::default(),
-        }));
+        let state = Arc::new(Mutex::new(initial));
+        let stop = Arc::new(AtomicBool::new(false));
 
-        let publisher_inner = Arc::clone(&inner);
-        let publisher_tx = tx.clone();
-        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let publisher_stop = Arc::clone(&stop_flag);
+        let worker_state = Arc::clone(&state);
+        let worker_tx = tx.clone();
+        let worker_stop = Arc::clone(&stop);
         std::thread::Builder::new()
             .name("player-fake-runtime".into())
             .spawn(move || {
-                loop {
-                    if publisher_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
+                while !worker_stop.load(Ordering::Relaxed) {
                     match command_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(command) => apply(&publisher_inner, &publisher_tx, command),
+                        Ok(command) => apply(&worker_state, &worker_tx, command),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
-                    publish(&publisher_inner, &publisher_tx);
                 }
             })
             .expect("spawn fake runtime thread");
 
-        // Land in Ready immediately: the fake has no sign-in step.
-        {
-            let mut state = inner.lock().unwrap();
-            state.snapshot.login = LoginState::Ready;
-            state.snapshot.audio = AudioState::Ready;
-        }
-        publish(&inner, &tx);
-
         FakeRuntime {
             tx,
             commands,
-            inner,
-            stop: stop_flag,
+            state,
+            stop,
         }
     }
 
     /// Force one exact snapshot (scripted scenarios for failure states).
     pub fn script_snapshot(&self, snapshot: Snapshot) {
-        let mut state = self.inner.lock().unwrap();
-        state.snapshot = snapshot;
-        drop(state);
-        publish(&self.inner, &self.tx);
+        *self.state.lock().unwrap() = snapshot;
+        publish(&self.state, &self.tx);
     }
 }
 
@@ -105,23 +95,32 @@ impl Default for FakeRuntime {
     }
 }
 
-impl Drop for FakeRuntime {
-    fn drop(&mut self) {
-        // Dropping the sender ends the publisher thread's recv_timeout loop.
-        let _ = self.commands.send(Command::DismissNotice).is_ok();
+fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command) {
+    if let Command::Search(query) = command {
+        state.lock().unwrap().search = SearchState::Loading {
+            query: query.clone(),
+        };
+        publish(state, tx);
+        std::thread::sleep(SEARCH_DELAY);
+        let needle = query.to_lowercase();
+        let results = canned_results()
+            .into_iter()
+            .filter(|p| {
+                needle.is_empty()
+                    || p.title.to_lowercase().contains(&needle)
+                    || p.artists_display().to_lowercase().contains(&needle)
+            })
+            .collect();
+        state.lock().unwrap().search = SearchState::Done { query, results };
+        publish(state, tx);
+        return;
     }
-}
 
-fn apply(inner: &Mutex<Inner>, tx: &watch::Sender<Snapshot>, command: Command) {
-    let mut state = inner.lock().unwrap();
-    let snap = &mut state.snapshot;
+    let mut snap = state.lock().unwrap();
     match command {
+        Command::Search(_) => unreachable!("handled above"),
         Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate => {
             snap.login = LoginState::Ready;
-        }
-        Command::Search(query) => {
-            snap.search = SearchState::Loading { query };
-            // Resolve below, after the lock is released.
         }
         Command::Play(playable) => {
             snap.playback = Some(PlaybackStatus {
@@ -182,10 +181,7 @@ fn apply(inner: &Mutex<Inner>, tx: &watch::Sender<Snapshot>, command: Command) {
         }
         Command::MoveQueued { index, up } => {
             let len = snap.queue.len();
-            if index >= len {
-                return;
-            }
-            if up && index > 0 {
+            if up && index > 0 && index < len {
                 snap.queue.swap(index - 1, index);
             } else if !up && index + 1 < len {
                 snap.queue.swap(index, index + 1);
@@ -194,29 +190,12 @@ fn apply(inner: &Mutex<Inner>, tx: &watch::Sender<Snapshot>, command: Command) {
         Command::ClearQueue => snap.queue.clear(),
         Command::DismissNotice => snap.notice = None,
     }
-
-    // A search resolves shortly after it starts; do it inline here (the
-    // publisher thread sleeps on its next poll anyway).
-    if let SearchState::Loading { query } = snap.search.clone() {
-        let results = canned_results()
-            .into_iter()
-            .filter(|p| {
-                query.is_empty()
-                    || p.title.to_lowercase().contains(&query.to_lowercase())
-                    || p.artists_display()
-                        .to_lowercase()
-                        .contains(&query.to_lowercase())
-            })
-            .collect::<Vec<_>>();
-        snap.search = SearchState::Done { query, results };
-    }
-
-    drop(state);
-    publish(inner, tx);
+    drop(snap);
+    publish(state, tx);
 }
 
-fn publish(inner: &Mutex<Inner>, tx: &watch::Sender<Snapshot>) {
-    let snapshot = inner.lock().unwrap().snapshot.clone();
+fn publish(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>) {
+    let snapshot = state.lock().unwrap().clone();
     tx.send_if_modified(|current| {
         if *current == snapshot {
             false
@@ -237,7 +216,7 @@ impl crate::Runtime for FakeRuntime {
     }
 
     fn shutdown(&self) {
-        // End the publisher thread; the process is on its way out.
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // End the worker thread; the process is on its way out.
+        self.stop.store(true, Ordering::Relaxed);
     }
 }

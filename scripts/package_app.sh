@@ -3,15 +3,14 @@
 # self-contained: no dynamic library in the bundle may reference a Homebrew
 # prefix. Signing and notarization are separate release gates (out of scope).
 #
-# Usage: scripts/package_app.sh [--fake]
-#   --fake  package a build wired to the scripted fake runtime (no Spotify),
-#           useful for verifying the bundle on clean accounts.
+# Usage: scripts/package_app.sh
+#
+# The bundle runs the real runtime. To exercise the bundle without Spotify,
+# launch it with the scripted fake:  open "target/pkg/Rust Player.app" --args --fake
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FAKE=0
-[[ "${1:-}" == "--fake" ]] && FAKE=1
 
 APP_NAME="Rust Player"
 BUNDLE_ID="dev.rustplayer.app"
@@ -20,7 +19,7 @@ APP_DIR="$BUILD_ROOT/Rust Player.app"
 CONTENTS="$APP_DIR/Contents"
 
 echo "==> building release binary"
-cargo build --release -p rust-player $([[ $FAKE -eq 1 ]] && echo --features "" )
+cargo build --release -p rust-player
 
 echo "==> locating libportaudio"
 PORTAUDIO="$(brew --prefix portaudio)/lib/libportaudio.2.dylib"
@@ -73,11 +72,10 @@ while IFS= read -r dylib_path; do
   [[ -z "$dylib_path" ]] && continue
   while IFS= read -r dep; do
     if [[ "$dep" == *"/opt/homebrew"* || "$dep" == *"/usr/local/Homebrew"* ]]; then
-      echo "  HOMEWORK LEFT: $dylib_path -> $dep"; FAIL=1
+      echo "  HOMEBREW LEFT: $dylib_path -> $dep"; FAIL=1
     fi
   done < <(otool -L "$dylib_path" | awk 'NR>1 {print $1}')
 done < <(find "$APP_DIR" -type f \( -perm -111 -o -name "*.dylib" \) -print)
-if codesign -d "$APP_DIR" >/dev/null 2>&1; then :; fi
 
 if [[ $FAIL -ne 0 ]]; then
   echo "error: bundle still references Homebrew paths" >&2

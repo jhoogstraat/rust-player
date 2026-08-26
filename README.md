@@ -45,6 +45,7 @@ cargo test
 
 ```sh
 scripts/package_app.sh          # unsigned .app with PortAudio bundled
+open "target/pkg/Rust Player.app" --args --fake   # try the bundle without Spotify
 docs/SMOKE_TEST.md              # the manual Premium-account pass
 ```
 
