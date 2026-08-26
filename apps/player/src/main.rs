@@ -839,6 +839,7 @@ fn open_player_window(cx: &mut App) {
         },
         |window, cx| {
             let mut rx = runtime.subscribe();
+            let mut position_rx = runtime.subscribe();
             let app = cx.new(|cx| {
                 // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
@@ -846,6 +847,11 @@ fn open_player_window(cx: &mut App) {
                         let snapshot = rx.borrow_and_update().clone();
                         if this
                             .update(cx, |app: &mut PlayerApp, cx| {
+                                // Delta gate (ticket 13): identical snapshots
+                                // cause no clone and no re-render.
+                                if app.snapshot == snapshot {
+                                    return;
+                                }
                                 app.snapshot = snapshot;
                                 // First ready snapshot: load the section the
                                 // sidebar opens with, so the second column is
@@ -869,24 +875,31 @@ fn open_player_window(cx: &mut App) {
                 })
                 .detach();
 
-                // Project playback position between snapshots at the tick rate so a
-                // 250 ms tick is smooth on screen.
+                // Position projection (ticket 13): while playing, the window
+                // redraws on animation frames so `projected_position_ms(now)`
+                // renders smoothly; paused/idle windows schedule nothing and
+                // receive no wakes at all. Snapshot events above restart the
+                // pump when playback resumes.
                 cx.spawn(async move |this, cx| {
                     loop {
+                        let playing = this.read_with(cx, |app, _| {
+                            app.snapshot.is_playing()
+                        })?;
+                        if !playing {
+                            // Sleep until the next snapshot event; re-check on wake.
+                            if position_rx.changed().await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        this.update(cx, |_, cx| {
+                            cx.notify();
+                        })?;
                         cx.background_executor()
                             .timer(Duration::from_millis(250))
                             .await;
-                        if this
-                            .update(cx, |app, cx| {
-                                if app.snapshot.is_playing() {
-                                    cx.notify();
-                                }
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
                     }
+                    anyhow::Ok(())
                 })
                 .detach();
 
