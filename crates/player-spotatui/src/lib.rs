@@ -11,10 +11,10 @@ use std::time::Instant;
 use tokio::sync::watch;
 
 use player_core::{
-    AudioState, Command, LibraryState, LoginState, Notice, Playable, PlaybackStatus, Runtime,
-    SearchState, Snapshot, Source,
+    AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Notice, Playable,
+    PlaybackStatus, Runtime, SearchState, Snapshot, Source,
 };
-use spotatui::frontend::{self, Action, Onboarding};
+use spotatui::frontend::{self, Action, ActionOutcome, LibraryTarget, Onboarding};
 
 /// Boot inputs for the real runtime.
 #[derive(Debug, Clone)]
@@ -97,10 +97,9 @@ pub struct SpotatuiPlayer {
     /// The query the current search state belongs to; the fork's snapshot
     /// carries results but not the text they answer.
     last_query: Arc<Mutex<Option<String>>>,
-    /// The library listing state the sidebar last requested; the fork exposes
-    /// no library endpoints yet, so it stays a truthful `Failed` until a
-    /// mapping exists.
-    last_library: Arc<Mutex<Option<LibraryState>>>,
+    /// The library section currently requested by the sidebar. The fork's
+    /// frontend snapshot carries the corresponding cached rows.
+    requested_library: Arc<Mutex<Option<LibrarySection>>>,
     /// Delivers the manual redirect-URL paste to the blocked boot prompt.
     paste_url_tx: mpsc::Sender<String>,
     /// Wakes the boot thread for another attempt after a failed boot.
@@ -119,7 +118,7 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
         tx: tx.clone(),
         frontend: Mutex::new(None),
         last_query: Arc::default(),
-        last_library: Arc::default(),
+        requested_library: Arc::default(),
         paste_url_tx,
         retry_boot_tx,
     });
@@ -191,13 +190,17 @@ impl SpotatuiPlayer {
         let mut rx = runtime.subscribe();
         let relay_tx = self.tx.clone();
         let last_query = Arc::clone(&self.last_query);
-        let last_library = Arc::clone(&self.last_library);
+        let requested_library = Arc::clone(&self.requested_library);
         runtime.handle().spawn(async move {
             loop {
                 let fork_snapshot = rx.borrow_and_update().clone();
                 let query = last_query.lock().unwrap().clone();
                 let mut snapshot = map_snapshot(&fork_snapshot, query.as_deref());
-                snapshot.library = last_library.lock().unwrap().clone().unwrap_or_default();
+                snapshot.library = requested_library
+                    .lock()
+                    .unwrap()
+                    .map(|section| map_library(&fork_snapshot, section))
+                    .unwrap_or_default();
                 publish(&relay_tx, snapshot);
                 if rx.changed().await.is_err() {
                     break;
@@ -248,21 +251,51 @@ impl Runtime for SpotatuiPlayer {
                         && self.retry_boot_tx.send(()).is_ok())
             }
             Command::Browse(section) => {
-                // The fork exposes no library listings yet; report the gap
-                // instead of leaving the section silently empty.
-                let failed = LibraryState::Failed {
-                    section,
-                    message: format!("{} is not available from this source yet.", section.label()),
+                // The playlist list is fetched during fork startup; liked
+                // songs and recently played are fetched by these actions.
+                let Some(()) = self.with_frontend(|_| ()) else {
+                    return false;
                 };
-                *self.last_library.lock().unwrap() = Some(failed.clone());
+                *self.requested_library.lock().unwrap() = Some(section);
                 let current = self.tx.borrow().clone();
                 publish(
                     &self.tx,
                     Snapshot {
-                        library: failed,
+                        library: LibraryState::Loading { section },
                         ..current
                     },
                 );
+
+                self.with_frontend(|runtime| match section {
+                    LibrarySection::LikedSongs => {
+                        runtime.apply(Action::OpenLibrary(LibraryTarget::LikedSongs))
+                    }
+                    LibrarySection::RecentlyPlayed => {
+                        runtime.apply(Action::OpenLibrary(LibraryTarget::RecentlyPlayed))
+                    }
+                    // No playlist LibraryTarget exists; startup already
+                    // dispatches GetPlaylists and the snapshot relays it.
+                    LibrarySection::Playlists => ActionOutcome::Applied,
+                });
+
+                // Playlists have no open-library action. Re-read the current
+                // fork snapshot so an already-loaded startup cache is visible
+                // immediately instead of waiting for an unrelated change.
+                if section == LibrarySection::Playlists {
+                    if let Some(fork) = self.with_frontend(|runtime| {
+                        let rx = runtime.subscribe();
+                        rx.borrow().clone()
+                    }) {
+                        let current = self.tx.borrow().clone();
+                        publish(
+                            &self.tx,
+                            Snapshot {
+                                library: map_library(&fork, section),
+                                ..current
+                            },
+                        );
+                    }
+                }
                 true
             }
             other => self
@@ -315,7 +348,9 @@ fn dispatch_command(runtime: &frontend::Runtime, command: Command) {
         // and the minimum TTL: `map_snapshot` drops empty notices at once and
         // the fork expires it on its next tick.
         Command::DismissNotice => Action::NotifyError(String::new(), 0),
-        Command::Search(_) | Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate
+        Command::Search(_)
+        | Command::SubmitPastedLoginUrl(_)
+        | Command::Reauthenticate
         | Command::Browse(_) => {
             unreachable!("handled in `command`")
         }
@@ -381,7 +416,10 @@ mod tests {
         let (tx, mut rx) = watch::channel(Snapshot::default());
 
         publish(&tx, map_snapshot(&idle_with_results(), Some("coltrane")));
-        assert!(matches!(rx.borrow_and_update().search, SearchState::Done { .. }));
+        assert!(matches!(
+            rx.borrow_and_update().search,
+            SearchState::Done { .. }
+        ));
 
         // Global spinner churn from an unrelated dispatch (playback poll):
         // old results stay published, only the global flag flips.
@@ -411,6 +449,58 @@ mod tests {
             SearchState::Loading { .. }
         ));
     }
+
+    #[test]
+    fn maps_fork_library_rows_and_keeps_unfetched_sections_loading() {
+        let fork = frontend::Snapshot {
+            library: frontend::LibrarySnapshot {
+                liked_songs: Some(vec![track("liked")]),
+                recently_played: Some(vec![track("recent")]),
+                playlists: Some(vec![frontend::PlaylistInfo {
+                    uri: "spotify:playlist:mix".to_string(),
+                    name: "Mix".to_string(),
+                    owner: "me".to_string(),
+                    track_count: 3,
+                    id: Some("mix".to_string()),
+                    owner_id: None,
+                    collaborative: false,
+                    public: Some(false),
+                    image_url: None,
+                }]),
+            },
+            ..Default::default()
+        };
+
+        let liked = map_library(&fork, LibrarySection::LikedSongs);
+        assert!(matches!(
+            liked,
+            LibraryState::Done {
+                section: LibrarySection::LikedSongs,
+                entries
+            } if matches!(entries.as_slice(), [LibraryEntry::Track { playable, played_at_ms: None }]
+                if playable.locator == "spotify:track:liked")
+        ));
+
+        let playlists = map_library(&fork, LibrarySection::Playlists);
+        assert!(matches!(
+            playlists,
+            LibraryState::Done {
+                section: LibrarySection::Playlists,
+                entries
+            } if matches!(entries.as_slice(), [LibraryEntry::Playlist { id, name, track_count }]
+                if id == "mix" && name == "Mix" && *track_count == 3)
+        ));
+
+        assert!(matches!(
+            map_library(
+                &frontend::Snapshot::default(),
+                LibrarySection::RecentlyPlayed
+            ),
+            LibraryState::Loading {
+                section: LibrarySection::RecentlyPlayed
+            }
+        ));
+    }
 }
 
 fn playable_from_track(track: &frontend::TrackInfo) -> Option<Playable> {
@@ -422,6 +512,48 @@ fn playable_from_track(track: &frontend::TrackInfo) -> Option<Playable> {
         album: track.album.clone(),
         duration_ms: track.duration_ms,
     })
+}
+
+fn library_track_entry(
+    track: &frontend::TrackInfo,
+    played_at_ms: Option<u64>,
+) -> Option<LibraryEntry> {
+    Some(LibraryEntry::Track {
+        playable: playable_from_track(track)?,
+        played_at_ms,
+    })
+}
+
+fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibraryState {
+    let entries = match section {
+        LibrarySection::LikedSongs => fork.library.liked_songs.as_ref().map(|tracks| {
+            tracks
+                .iter()
+                .filter_map(|track| library_track_entry(track, None))
+                .collect::<Vec<_>>()
+        }),
+        LibrarySection::RecentlyPlayed => fork.library.recently_played.as_ref().map(|tracks| {
+            tracks
+                .iter()
+                .filter_map(|track| library_track_entry(track, None))
+                .collect::<Vec<_>>()
+        }),
+        LibrarySection::Playlists => fork.library.playlists.as_ref().map(|playlists| {
+            playlists
+                .iter()
+                .map(|playlist| LibraryEntry::Playlist {
+                    id: playlist.id.clone().unwrap_or_else(|| playlist.uri.clone()),
+                    name: playlist.name.clone(),
+                    track_count: playlist.track_count,
+                })
+                .collect::<Vec<_>>()
+        }),
+    };
+
+    match entries {
+        Some(entries) => LibraryState::Done { section, entries },
+        None => LibraryState::Loading { section },
+    }
 }
 
 fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot {

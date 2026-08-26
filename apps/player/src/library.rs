@@ -3,8 +3,11 @@
 //! album | duration, click plays, chip enqueues); playlist rows show name
 //! and size — drilling into one is deferred until a source exposes it.
 
+use std::ops::Range;
+
 use gpui::{
-    Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px,
+    AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, div,
+    prelude::*, px, uniform_list,
 };
 use player_core::{LibraryEntry, LibrarySection, LibraryState};
 
@@ -31,24 +34,28 @@ pub(crate) fn render_library(
         ),
         LibraryState::Done { entries, .. } => {
             let count = Some(entries.len());
-            let rows: Vec<_> = entries
-                .iter()
-                .enumerate()
-                .map(|(i, entry)| match entry {
-                    LibraryEntry::Track {
-                        playable,
-                        played_at_ms,
-                    } => track_row(playable, *played_at_ms, i, cx).into_any_element(),
-                    LibraryEntry::Playlist {
-                        name,
-                        track_count,
-                        ..
-                    } => playlist_row(name, *track_count, i).into_any_element(),
-                })
-                .collect();
             (
                 count,
-                div().flex().flex_col().children(rows).into_any_element(),
+                // Each library section contains one row shape, so the
+                // uniform list can lay out only the visible range.
+                uniform_list(
+                    "library-rows",
+                    entries.len(),
+                    cx.processor(|app, range: Range<usize>, _, cx| {
+                        let LibraryState::Done { entries, .. } = &app.snapshot.library else {
+                            return Vec::new();
+                        };
+                        range
+                            .filter_map(|index| {
+                                entries
+                                    .get(index)
+                                    .map(|entry| render_library_entry(entry, index, cx))
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .size_full()
+                .into_any_element(),
             )
         }
     };
@@ -89,9 +96,27 @@ pub(crate) fn render_library(
                 .id("library-list")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .overflow_hidden()
                 .child(body),
         )
+}
+
+fn render_library_entry(
+    entry: &LibraryEntry,
+    index: usize,
+    cx: &mut Context<PlayerApp>,
+) -> AnyElement {
+    match entry {
+        LibraryEntry::Track {
+            playable,
+            played_at_ms,
+        } => track_row(playable, *played_at_ms, index, cx).into_any_element(),
+        LibraryEntry::Playlist {
+            name,
+            track_count,
+            ..
+        } => playlist_row(name, *track_count, index).into_any_element(),
+    }
 }
 
 /// One playable track row: click plays, the chip enqueues.

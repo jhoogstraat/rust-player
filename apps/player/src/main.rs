@@ -876,7 +876,14 @@ fn open_player_window(cx: &mut App) {
                         cx.background_executor()
                             .timer(Duration::from_millis(250))
                             .await;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        if this
+                            .update(cx, |app, cx| {
+                                if app.snapshot.is_playing() {
+                                    cx.notify();
+                                }
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                     }
