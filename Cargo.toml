@@ -24,6 +24,6 @@ player-spotatui = { path = "crates/player-spotatui" }
 # the fork morph is complete and the local path override is retired. A
 # `.cargo/config.toml` enables CLI git fetch so credential management
 # matches normal git usage.
-spotatui = { git = "https://github.com/jhoogstraat/spotatui", rev = "d98f327", default-features = false, features = ["streaming"] }
+spotatui = { git = "https://github.com/jhoogstraat/spotatui", rev = "e814179", default-features = false, features = ["streaming"] }
 
 tokio = { version = "1", default-features = false, features = ["sync"] }

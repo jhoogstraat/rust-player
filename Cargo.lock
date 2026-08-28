@@ -3187,7 +3187,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6639,7 +6639,7 @@ dependencies = [
 [[package]]
 name = "spotatui"
 version = "0.41.0"
-source = "git+https://github.com/jhoogstraat/spotatui?rev=d98f327#d98f32732a4bdf4f142c56448788f0f9fe676298"
+source = "git+https://github.com/jhoogstraat/spotatui?rev=e814179#e814179e9af844459a46ceef5a1b79f76318ac01"
 dependencies = [
  "anyhow",
  "arboard",
