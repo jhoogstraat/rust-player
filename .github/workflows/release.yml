@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-13
+            optional: false
+          - name: windows
+            os: windows-latest
+            optional: false
+          - name: linux
+            os: ubuntu-latest
+            optional: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install macOS dependencies
+        if: matrix.name == 'macos'
+        run: brew install pkgconf portaudio
+
+      - name: Package macOS app
+        if: matrix.name == 'macos'
+        run: |
+          scripts/package_app.sh
+          ditto -c -k --sequesterRsrc --keepParent "target/pkg/Rust Player.app" rust-player-macos.zip
+
+      - name: Install Windows dependencies
+        if: matrix.name == 'windows'
+        run: vcpkg install portaudio:x64-windows
+
+      - name: Package Windows app
+        if: matrix.name == 'windows'
+        shell: pwsh
+        env:
+          VCPKGRS_DYNAMIC: "1"
+          VCPKG_DEFAULT_TRIPLET: x64-windows
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cargo build --release -p rust-player
+          New-Item -ItemType Directory -Force rust-player-windows | Out-Null
+          Copy-Item target/release/rust-player.exe rust-player-windows/
+          Copy-Item "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/portaudio.dll" rust-player-windows/
+          Compress-Archive -Path rust-player-windows -DestinationPath rust-player-windows.zip
+
+      - name: Install Linux dependencies
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install --yes pkg-config portaudio19-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-xcb-dev libxcb-shape0-dev libxcb-xfixes0-dev libdbus-1-dev
+
+      - name: Package Linux app
+        if: matrix.name == 'linux'
+        run: |
+          cargo build --release -p rust-player
+          tar -czf rust-player-linux.tar.gz -C target/release rust-player
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-player-${{ matrix.name }}
+          path: rust-player-${{ matrix.name }}.${{ matrix.name == 'linux' && 'tar.gz' || 'zip' }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/*

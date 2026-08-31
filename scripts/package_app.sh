@@ -32,6 +32,7 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Frameworks" "$CONTENTS/Resources"
 BIN="$CONTENTS/MacOS/rust-player"
 cp "$ROOT/target/release/rust-player" "$BIN"
 cp "$ROOT/docs/SMOKE_TEST.md" "$CONTENTS/Resources/" 2>/dev/null || true
+cp "$ROOT/apps/player/assets/RustPlayer.icns" "$CONTENTS/Resources/"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,6 +42,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>rust-player</string>
+    <key>CFBundleIconFile</key><string>RustPlayer</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/apps/player/Cargo.toml" | head -1)</string>
     <key>LSMinimumSystemVersion</key><string>10.15</string>

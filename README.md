@@ -1,39 +1,54 @@
+![Rust Player — native music player window over a purple statue wallpaper](screenshot.png)
+
 # Rust Player
 
-A small native macOS music player: a GPUI window over Spotify's catalog with
-native audio playback, built on a private Spotatui fork. No terminal, no
-Spotify desktop client.
+A small native macOS music player written in Rust. It browses Spotify, plays
+audio locally, and keeps the player window focused on the essentials: search,
+queue, and transport controls. No Spotify desktop client or terminal is needed
+to listen.
 
-## Layout
+## What it does
 
-- `crates/player-core` — the source-neutral contract (snapshot, commands,
-  runtime trait), a scripted fake runtime, and progress projection. Depends on
-  nothing heavier than `tokio::sync`.
-- `crates/player-spotatui` — adapter mapping the contract onto the fork's
-  `frontend` module. No playback logic.
-- `apps/player` — the GPUI application. Never imports the fork.
-- The Spotatui fork is consumed from a sibling checkout at `../spotatui`
-  (path override documented in `Cargo.toml`; production pins it over Git).
+- Signs in through Spotify in the browser and restores the session on later launches.
+- Searches Spotify's catalog and lets you play or queue results.
+- Provides native playback, progress, previous/next, pause/resume, and volume controls.
+- Keeps playback running when the window closes; reopen it from the dock.
+- Runs against a scripted fake runtime for UI work without credentials or audio hardware.
 
-## Prerequisites
+## Project layout
+
+- `apps/player` — the native GPUI application.
+- `crates/player-core` — source-neutral commands, snapshots, runtime contract, and fake runtime.
+- `crates/player-spotatui` — adapter from that contract to the embedded playback engine.
+- `docs/` — implementation decisions, smoke test, and supporting research.
+
+## Requirements
+
+Rust and the macOS build tools are required. For native playback, install
+PortAudio and `pkgconf`:
 
 ```sh
 brew install pkgconf portaudio
 ```
 
-Spotatui is built with `streaming` unconditionally on, which selects
-librespot's PortAudio backend via `pkg-config`; without `pkgconf`, `cargo
-check` fails clearly in that build script — that failure *is* the readiness
-check.
-
 ## Run
 
+Start the app with a deterministic, credential-free runtime:
+
 ```sh
-cargo run -- --fake   # scripted runtime: no credentials, no audio hardware
-cargo run             # real runtime; data root ~/Library/Application Support/rust-player
+cargo run -- --fake
 ```
 
-## Checks
+Or launch the Spotify-backed player:
+
+```sh
+cargo run
+```
+
+The first real launch opens the browser for Spotify sign-in. Native streaming
+requires a Spotify Premium account.
+
+## Development checks
 
 ```sh
 cargo fmt --check
@@ -41,13 +56,19 @@ cargo check
 cargo test
 ```
 
-## Package (macOS)
+## Package for macOS
+
+Build an unsigned, self-contained app bundle with PortAudio included:
 
 ```sh
-scripts/package_app.sh          # unsigned .app with PortAudio bundled
-open "target/pkg/Rust Player.app" --args --fake   # try the bundle without Spotify
-docs/SMOKE_TEST.md              # the manual Premium-account pass
+scripts/package_app.sh
+open "target/pkg/Rust Player.app" --args --fake
 ```
 
-See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the
-authoritative roadmap and [CONTEXT.md](CONTEXT.md) for domain language.
+See [the manual smoke test](docs/SMOKE_TEST.md) before shipping a release.
+
+## More context
+
+[Implementation plan](docs/IMPLEMENTATION_PLAN.md) documents the product and
+architecture decisions. [CONTEXT.md](CONTEXT.md) defines the project's domain
+language.

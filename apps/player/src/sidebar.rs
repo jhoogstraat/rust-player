@@ -67,10 +67,7 @@ const NAV_ITEMS: [NavSection; 4] = [
 ];
 
 /// The sidebar column: nav rows on top, Settings pinned to the bottom.
-pub(crate) fn render_sidebar(
-    app: &PlayerApp,
-    cx: &mut Context<PlayerApp>,
-) -> impl IntoElement {
+pub(crate) fn render_sidebar(app: &PlayerApp, cx: &mut Context<PlayerApp>) -> impl IntoElement {
     div()
         .w(px(SIDEBAR_WIDTH))
         .h_full()

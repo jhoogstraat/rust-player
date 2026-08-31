@@ -11,7 +11,7 @@ use gpui::{
 };
 use player_core::{LibraryEntry, LibrarySection, LibraryState};
 
-use crate::{PlayerApp, border, rgb, tone, ACCENT, MUTED, PANEL};
+use crate::{ACCENT, MUTED, PANEL, PlayerApp, border, rgb, tone};
 
 /// The listing never collapses below a readable table width.
 pub(crate) const LIBRARY_MIN_WIDTH: f32 = 300.0;
@@ -23,15 +23,16 @@ pub(crate) fn render_library(
     cx: &Context<PlayerApp>,
 ) -> impl IntoElement {
     let (count, body) = match &app.snapshot.library {
-        LibraryState::Idle => (None, status_row("Choose a section.".to_string()).into_any_element()),
-        LibraryState::Loading { .. } => (
+        LibraryState::Idle => (
             None,
-            status_row("Loading…".to_string()).into_any_element(),
+            status_row("Choose a section.".to_string()).into_any_element(),
         ),
-        LibraryState::Failed { message, .. } => (
-            None,
-            status_row(message.clone()).into_any_element(),
-        ),
+        LibraryState::Loading { .. } => {
+            (None, status_row("Loading…".to_string()).into_any_element())
+        }
+        LibraryState::Failed { message, .. } => {
+            (None, status_row(message.clone()).into_any_element())
+        }
         LibraryState::Done { entries, .. } => {
             let count = Some(entries.len());
             (
@@ -101,20 +102,14 @@ pub(crate) fn render_library(
         )
 }
 
-fn render_library_entry(
-    entry: &LibraryEntry,
-    index: usize,
-    cx: &Context<PlayerApp>,
-) -> AnyElement {
+fn render_library_entry(entry: &LibraryEntry, index: usize, cx: &Context<PlayerApp>) -> AnyElement {
     match entry {
         LibraryEntry::Track {
             playable,
             played_at_ms,
         } => track_row(playable, *played_at_ms, index, cx).into_any_element(),
         LibraryEntry::Playlist {
-            name,
-            track_count,
-            ..
+            name, track_count, ..
         } => playlist_row(name, *track_count, index).into_any_element(),
     }
 }
@@ -141,7 +136,9 @@ pub(crate) fn track_row(
         .gap(px(10.0))
         .cursor_pointer()
         .hover(|style| style.bg(tone(PANEL, 0.60)))
-        .on_click(cx.listener(move |app, _, _, _| app.send(player_core::Command::Play(play.clone()))))
+        .on_click(
+            cx.listener(move |app, _, _, _| app.send(player_core::Command::Play(play.clone()))),
+        )
         .child(two_line_cell(
             playable.title.clone(),
             format!("{} — {}", playable.artists_display(), playable.album),
