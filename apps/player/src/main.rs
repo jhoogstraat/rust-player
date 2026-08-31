@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
+    AnyElement, App, Bounds, ClipboardItem, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
     SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
     div, hsla, prelude::*, px, relative, rgb,
 };
@@ -158,6 +158,18 @@ impl PlayerApp {
                 }
                 KeyOutcome::Edited => cx.notify(),
                 KeyOutcome::Blur => window.focus(&self.root_focus, cx),
+                KeyOutcome::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                KeyOutcome::Cut(text) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    cx.notify();
+                }
+                KeyOutcome::Paste => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                        && field.paste(&text)
+                    {
+                        cx.notify();
+                    }
+                }
                 KeyOutcome::Ignored => {}
             }
             return;
@@ -466,40 +478,72 @@ impl PlayerApp {
 
         // Search results column.
         let results = if let Some(Some(target)) = self.search_history.get(self.search_history_index) {
-            let tracks = match &snap.search_detail {
-                Some(SearchDetail::Artist { tracks, .. })
-                | Some(SearchDetail::Album { tracks })
-                | Some(SearchDetail::Playlist { tracks }) => tracks.as_slice(),
-                None => &[],
+            let mut rows = Vec::new();
+            let name = match target {
+                SearchTarget::Artist { name, .. }
+                | SearchTarget::Album { name, .. }
+                | SearchTarget::Playlist { name, .. } => name,
             };
-            let rows: Vec<_> = tracks
-                .iter()
-                .enumerate()
-                .map(|(i, track)| {
-                    let play = track.clone();
-                    div()
-                        .id(SharedString::from(format!("detail-track-{i}")))
-                        .px(px(18.))
-                        .py(px(8.))
-                        .border_b_1()
-                        .border_color(border())
-                        .cursor_pointer()
-                        .hover(|style| style.bg(tone(PANEL, 0.60)))
-                        .on_click(cx.listener(move |app, _, _, _| app.send(Command::Play(play.clone()))))
-                        .child(format!("{} — {}", track.title, track.artists_display()))
-                        .into_any_element()
-                })
-                .collect();
+            rows.push(
+                div()
+                    .px(px(18.))
+                    .pt(px(12.))
+                    .pb(px(8.))
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name.clone())
+                    .into_any_element(),
+            );
+            match &snap.search_detail {
+                Some(SearchDetail::Artist { tracks, albums }) => {
+                    if !tracks.is_empty() {
+                        rows.push(search_heading("Most famous tracks").into_any_element());
+                        rows.extend(tracks.iter().enumerate().map(|(i, track)| {
+                            library::track_row(track, None, i, cx).into_any_element()
+                        }));
+                    }
+                    if !albums.is_empty() {
+                        rows.push(search_heading("Albums").into_any_element());
+                        rows.extend(albums.iter().enumerate().map(|(i, album)| {
+                            let target = SearchTarget::Album {
+                                locator: album.locator.clone(),
+                                name: album.name.clone(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("artist-album-{i}")))
+                                .w_full()
+                                .px(px(14.))
+                                .py(px(8.))
+                                .border_b_1()
+                                .border_color(border())
+                                .flex()
+                                .items_center()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.open_search_target(target.clone(), cx);
+                                }))
+                                .child(library::two_line_cell(
+                                    album.name.clone(),
+                                    album.artists.join(", "),
+                                ))
+                                .into_any_element()
+                        }));
+                    }
+                }
+                Some(SearchDetail::Album { tracks }) | Some(SearchDetail::Playlist { tracks }) => {
+                    rows.push(search_heading("Tracks").into_any_element());
+                    rows.extend(tracks.iter().enumerate().map(|(i, track)| {
+                        library::track_row(track, None, i, cx).into_any_element()
+                    }));
+                }
+                None => rows.push(status_row("Loading…".to_string()).into_any_element()),
+            }
             div()
                 .id("search-detail")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .child(search_heading(match target {
-                    SearchTarget::Artist { name, .. }
-                    | SearchTarget::Album { name, .. }
-                    | SearchTarget::Playlist { name, .. } => name,
-                }))
                 .children(rows)
                 .into_any_element()
         } else { match &snap.search {
@@ -541,15 +585,20 @@ impl PlayerApp {
                         let target = SearchTarget::Album { locator: album.locator.clone(), name: album.name.clone() };
                         div()
                             .id(SharedString::from(format!("album-{i}")))
-                            .px(px(18.))
+                            .w_full()
+                            .px(px(14.))
                             .py(px(8.))
                             .border_b_1()
                             .border_color(border())
-                            .text_size(px(13.))
+                            .flex()
+                            .items_center()
                             .cursor_pointer()
                             .hover(|style| style.bg(tone(PANEL, 0.60)))
                             .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
-                            .child(format!("{} — {}", album.name, album.artists.join(", ")))
+                            .child(library::two_line_cell(
+                                album.name.clone(),
+                                album.artists.join(", "),
+                            ))
                             .into_any_element()
                     }));
                 }
@@ -559,17 +608,20 @@ impl PlayerApp {
                         let target = SearchTarget::Playlist { locator: playlist.locator.clone(), name: playlist.name.clone() };
                         div()
                             .id(SharedString::from(format!("playlist-{i}")))
-                            .px(px(18.))
+                            .w_full()
+                            .px(px(14.))
                             .py(px(8.))
                             .border_b_1()
                             .border_color(border())
+                            .flex()
+                            .items_center()
                             .text_size(px(13.))
                             .cursor_pointer()
                             .hover(|style| style.bg(tone(PANEL, 0.60)))
                             .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
-                            .child(format!(
-                                "{} — {} · {} tracks",
-                                playlist.name, playlist.owner, playlist.track_count
+                            .child(library::two_line_cell(
+                                playlist.name.clone(),
+                                format!("{} · {} tracks", playlist.owner, playlist.track_count),
                             ))
                             .into_any_element()
                     }));
@@ -617,7 +669,18 @@ impl PlayerApp {
                         cx,
                         1,
                     ))
-                    .child(div().flex_1().child(self.search.render("search-input", window))),
+                    .child(
+                        div()
+                            .flex_1()
+                            // Ported from Comet's `search_input_frame`.
+                            .mb(px(4.))
+                            .px(px(10.))
+                            .py(px(6.))
+                            .rounded(px(8.))
+                            .bg(wash(0.04))
+                            .text_size(px(13.))
+                            .child(self.search.render_search("search-input", window)),
+                    ),
             )
             .child(
                 div()
@@ -645,9 +708,21 @@ impl PlayerApp {
                 div()
                     .px(px(14.))
                     .py(px(10.))
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child(format!("UP NEXT ({})", snap.queue.len())),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(format!("UP NEXT ({})", snap.queue.len())),
+                    )
+                    .child(small_button(
+                        "clear-queue".into(),
+                        "Clear",
+                        !snap.queue.is_empty(),
+                        cx.listener(|app, _, _, _| app.send(Command::ClearQueue)),
+                    )),
             )
             .when(snap.queue.is_empty(), |panel| {
                 panel.child(

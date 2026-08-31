@@ -142,35 +142,10 @@ pub(crate) fn track_row(
         .cursor_pointer()
         .hover(|style| style.bg(tone(PANEL, 0.60)))
         .on_click(cx.listener(move |app, _, _, _| app.send(player_core::Command::Play(play.clone()))))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .truncate()
-                        .child(playable.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .truncate()
-                        .child(format!(
-                            "{} — {}",
-                            playable.artists_display(),
-                            playable.album
-                        )),
-                ),
-        )
+        .child(two_line_cell(
+            playable.title.clone(),
+            format!("{} — {}", playable.artists_display(), playable.album),
+        ))
         .children(played_at_ms.map(|at| {
             div()
                 .flex_none()
@@ -186,6 +161,32 @@ pub(crate) fn track_row(
                 .child(clock(playable.duration_ms)),
         )
         .child(enqueue_chip(index, enqueue, cx))
+}
+
+pub(crate) fn two_line_cell(title: String, subtitle: String) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .truncate()
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .truncate()
+                .child(subtitle),
+        )
 }
 
 fn enqueue_chip(
