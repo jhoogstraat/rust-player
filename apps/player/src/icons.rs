@@ -42,6 +42,8 @@ macro_rules! icon_assets {
 icon_assets![
     // Liked songs (also the favorites affordance at large).
     (STAR, "star"),
+    (PLAY, "play"),
+    (PAUSE, "pause"),
     (MAGNIFIER, "magnifier"),
     (CLOCK_CIRCLE, "clock-circle"),
     (LIST, "list"),

@@ -291,7 +291,13 @@ impl Render for PlayerApp {
                     .border_color(border())
                     .child(button(
                         "toggle",
-                        if snap.is_playing() { "Pause" } else { "Play" },
+                        icons::icon(if snap.is_playing() {
+                            icons::PAUSE
+                        } else {
+                            icons::PLAY
+                        })
+                        .size(px(16.))
+                        .text_color(rgb(TEXT)),
                         cx.listener(|app, _, _, _| {
                             app.send(if app.snapshot.is_playing() {
                                 Command::Pause
@@ -931,7 +937,7 @@ fn input_shell(child: impl IntoElement) -> impl IntoElement {
 
 fn button(
     id: &'static str,
-    label: impl Into<SharedString>,
+    label: impl IntoElement,
     handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -949,7 +955,7 @@ fn button(
         .cursor_pointer()
         .hover(|style| style.bg(tone(0x232328, 0.75)))
         .on_click(handler)
-        .child(label.into())
+        .child(label)
 }
 
 fn small_button(
