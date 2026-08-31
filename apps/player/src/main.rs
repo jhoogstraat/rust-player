@@ -292,7 +292,7 @@ impl Render for PlayerApp {
                     })
             }))
             // Now-playing bar
-            .child(self.render_now_playing(&snap))
+            .child(self.render_now_playing(&snap, cx))
             // Transport row
             .child(
                 div()
@@ -659,7 +659,7 @@ impl PlayerApp {
             )
     }
 
-    fn render_now_playing(&self, snap: &Snapshot) -> impl IntoElement {
+    fn render_now_playing(&self, snap: &Snapshot, cx: &Context<Self>) -> impl IntoElement {
         let now = Instant::now();
         let (title_line, position_ms, duration_ms, progress) = match &snap.playback {
             Some(p) => {
@@ -685,19 +685,24 @@ impl PlayerApp {
         };
 
         div()
+            .id("now-playing")
             .border_t_1()
             .border_color(border())
-            .flex()
-            .flex_col()
+            .h(px(40.))
+            .relative()
+            .bg(tone(0x232328, 0.75))
             .child(
                 div()
-                    .h(px(3.))
-                    .bg(tone(0x232328, 0.75))
-                    .child(div().h_full().w(relative(progress)).bg(rgb(ACCENT))),
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(relative(progress))
+                    .bg(Hsla::from(rgb(ACCENT)).opacity(0.55)),
             )
             .child(
                 div()
-                    .h(px(40.))
+                    .size_full()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -712,6 +717,12 @@ impl PlayerApp {
                     )),
             )
             .cursor_pointer()
+            .on_click(cx.listener(move |app, event: &gpui::ClickEvent, window, _| {
+                if duration_ms > 0 {
+                    let fraction = (event.position().x / window.viewport_size().width).clamp(0., 1.);
+                    app.send(Command::Seek((duration_ms as f32 * fraction) as u64));
+                }
+            }))
     }
 }
 
