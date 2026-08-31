@@ -130,6 +130,7 @@ fn track_row(
     let enqueue = playable.clone();
     div()
         .id(SharedString::from(format!("library-track-{index}")))
+        .w_full()
         .px(px(14.0))
         .py(px(8.0))
         .border_b_1()
@@ -214,6 +215,7 @@ fn enqueue_chip(
 fn playlist_row(name: &str, track_count: u32, index: usize) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("library-playlist-{index}")))
+        .w_full()
         .px(px(14.0))
         .py(px(8.0))
         .border_b_1()
