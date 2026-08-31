@@ -9,8 +9,8 @@ use gpui::{
 };
 use player_core::{Command, LibrarySection};
 
-use crate::{PlayerApp, border, icons, tone, wash, PANEL, TEXT};
 use crate::{MUTED, rgb};
+use crate::{PANEL, PlayerApp, TEXT, border, icons, tone, wash};
 
 /// Fixed sidebar width (Comet's default).
 pub(crate) const SIDEBAR_WIDTH: f32 = 256.0;
@@ -19,6 +19,7 @@ pub(crate) const SIDEBAR_WIDTH: f32 = 256.0;
 /// Settings swaps the main area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavSection {
+    Search,
     LikedSongs,
     RecentlyPlayed,
     Playlists,
@@ -29,6 +30,7 @@ impl NavSection {
     /// The library section this nav destination browses, if any.
     pub(crate) fn library(&self) -> Option<LibrarySection> {
         match self {
+            NavSection::Search => None,
             NavSection::LikedSongs => Some(LibrarySection::LikedSongs),
             NavSection::RecentlyPlayed => Some(LibrarySection::RecentlyPlayed),
             NavSection::Playlists => Some(LibrarySection::Playlists),
@@ -38,6 +40,7 @@ impl NavSection {
 
     fn icon(&self) -> &'static str {
         match self {
+            NavSection::Search => icons::MAGNIFIER,
             NavSection::LikedSongs => icons::STAR,
             NavSection::RecentlyPlayed => icons::CLOCK_CIRCLE,
             NavSection::Playlists => icons::LIST,
@@ -47,6 +50,7 @@ impl NavSection {
 
     fn label(&self) -> &'static str {
         match self {
+            NavSection::Search => "Search",
             NavSection::LikedSongs => "Liked songs",
             NavSection::RecentlyPlayed => "Recently played",
             NavSection::Playlists => "Playlists",
@@ -55,8 +59,9 @@ impl NavSection {
     }
 }
 
-const NAV_ITEMS: [NavSection; 3] = [
+const NAV_ITEMS: [NavSection; 4] = [
     NavSection::LikedSongs,
+    NavSection::Search,
     NavSection::RecentlyPlayed,
     NavSection::Playlists,
 ];

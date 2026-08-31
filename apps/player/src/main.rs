@@ -155,7 +155,11 @@ impl PlayerApp {
             "p" => self.send(Command::Previous),
             "+" | "=" => self.send(volume_command(&self.snapshot, 10)),
             "-" => self.send(volume_command(&self.snapshot, -10)),
-            "/" => window.focus(&self.search.focus, cx),
+            "/" => {
+                self.nav = sidebar::NavSection::Search;
+                window.focus(&self.search.focus, cx);
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -188,7 +192,9 @@ impl Render for PlayerApp {
             .track_focus(&self.root_focus)
             .on_key_down(cx.listener(Self::handle_key))
             .on_action(cx.listener(|app, _: &FocusSearch, window, cx| {
+                app.nav = sidebar::NavSection::Search;
                 window.focus(&app.search.focus, cx);
+                cx.notify();
             }))
             .on_action(cx.listener(|app, _: &NextTrack, _, _| app.send(Command::Next)))
             .on_action(cx.listener(|app, _: &PreviousTrack, _, _| app.send(Command::Previous)))
@@ -254,10 +260,12 @@ impl Render for PlayerApp {
                             )
                         },
                     )
-                    .child(if self.nav == sidebar::NavSection::Settings {
-                        self.render_settings().into_any_element()
-                    } else {
-                        self.render_content(window, cx).into_any_element()
+                    .child(match self.nav {
+                        sidebar::NavSection::Settings => self.render_settings().into_any_element(),
+                        sidebar::NavSection::Search => {
+                            self.render_search(window, cx).into_any_element()
+                        }
+                        _ => div().flex_1().into_any_element(),
                     })
                     .into_any_element()
             } else {
@@ -467,7 +475,7 @@ impl PlayerApp {
         )
     }
 
-    fn render_content(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn render_search(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let snap = &self.snapshot;
 
         // Search results column.
@@ -555,7 +563,6 @@ impl PlayerApp {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // Search box
             .child(
                 div()
                     .px(px(18.))
