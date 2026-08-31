@@ -128,6 +128,7 @@ impl TextField {
         div()
             .id(id)
             .track_focus(&self.focus)
+            .w_full()
             .h(px(34.))
             .px(px(10.))
             .rounded(px(7.))

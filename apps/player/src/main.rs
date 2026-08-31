@@ -533,7 +533,7 @@ impl PlayerApp {
                     .px(px(18.))
                     .pt(px(14.))
                     .pb(px(10.))
-                    .child(input_shell(self.search.render("search-input", window))),
+                    .child(input_shell_full(self.search.render("search-input", window))),
             )
             .child(
                 div()
@@ -729,6 +729,10 @@ fn status_row_with_retry(text: String, query: String, cx: &Context<PlayerApp>) -
 
 fn input_shell(child: impl IntoElement) -> impl IntoElement {
     div().pb(px(10.)).max_w(px(480.)).child(child)
+}
+
+fn input_shell_full(child: impl IntoElement) -> impl IntoElement {
+    div().pb(px(10.)).w_full().child(child)
 }
 
 fn button(
