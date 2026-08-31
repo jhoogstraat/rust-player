@@ -62,7 +62,6 @@ actions!(
         PreviousTrack,
         VolumeUp,
         VolumeDown,
-        ToggleQueuePanel,
     ]
 );
 
@@ -91,7 +90,6 @@ struct PlayerApp {
     root_focus: gpui::FocusHandle,
     search: TextField,
     paste: TextField,
-    queue_open: bool,
 }
 
 impl PlayerApp {
@@ -204,44 +202,11 @@ impl Render for PlayerApp {
             .on_action(cx.listener(|app, _: &VolumeDown, _, _| {
                 app.send(volume_command(&app.snapshot, -10));
             }))
-            .on_action(cx.listener(|app, _: &ToggleQueuePanel, _, cx| {
-                app.queue_open = !app.queue_open;
-                cx.notify();
-            }))
             .size_full()
             .flex()
             .flex_col()
             .bg(tone(BG, 0.80))
             .text_color(rgb(TEXT))
-            // Header
-            .child(
-                div()
-                    .h(px(44.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(18.))
-                    .border_b_1()
-                    .border_color(border())
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Rust Player"),
-                    )
-                    .child(div().flex().gap(px(8.)).child(button(
-                        "toggle-queue",
-                        if self.queue_open {
-                            "Hide Queue"
-                        } else {
-                            "Queue"
-                        },
-                        cx.listener(|app, _, _, cx| {
-                            app.queue_open = !app.queue_open;
-                            cx.notify();
-                        }),
-                    ))),
-            )
             // Body: sign-in takes the whole window until the runtime is
             // ready; then the Comet column layout — fixed sidebar, second
             // column with the browsed library listing, main area.
@@ -260,13 +225,13 @@ impl Render for PlayerApp {
                             )
                         },
                     )
-                    .child(match self.nav {
-                        sidebar::NavSection::Settings => self.render_settings().into_any_element(),
-                        sidebar::NavSection::Search => {
-                            self.render_search(window, cx).into_any_element()
-                        }
-                        _ => div().flex_1().into_any_element(),
+                    .when(self.nav == sidebar::NavSection::Settings, |row| {
+                        row.child(self.render_settings().into_any_element())
                     })
+                    .when(self.nav == sidebar::NavSection::Search, |row| {
+                        row.child(self.render_search(window, cx).into_any_element())
+                    })
+                    .child(self.render_queue(cx))
                     .into_any_element()
             } else {
                 self.render_sign_in(window, cx).into_any_element()
@@ -575,95 +540,86 @@ impl PlayerApp {
                     .flex_1()
                     .min_h_0()
                     .flex()
+                    .flex_col()
                     .overflow_hidden()
-                    // Results column
+                    .child(results),
+            )
+    }
+
+    fn render_queue(&self, cx: &Context<Self>) -> impl IntoElement {
+        let snap = &self.snapshot;
+
+        div()
+            .w(px(300.))
+            .flex_none()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(border())
+            .child(
+                div()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child(format!("UP NEXT ({})", snap.queue.len())),
+            )
+            .when(snap.queue.is_empty(), |panel| {
+                panel.child(
+                    div()
+                        .px(px(14.))
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child("Empty — add something from the results."),
+                )
+            })
+            .children(snap.queue.iter().enumerate().map(|(i, playable)| {
+                div()
+                    .px(px(14.))
+                    .py(px(7.))
+                    .border_t_1()
+                    .border_color(border())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(12.))
+                    .child(div().flex_1().overflow_hidden().child(format!(
+                        "{}. {} — {}",
+                        i + 1,
+                        playable.title,
+                        playable.artists_display()
+                    )))
                     .child(
                         div()
-                            .flex_1()
-                            .min_h_0()
                             .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .child(results),
+                            .gap(px(6.))
+                            .child(small_button(
+                                SharedString::from(format!("q-up-{i}")),
+                                "↑",
+                                cx.listener(move |app, _, _, _| {
+                                    app.send(Command::MoveQueued { index: i, up: true });
+                                }),
+                            ))
+                            .child(small_button(
+                                SharedString::from(format!("q-down-{i}")),
+                                "↓",
+                                cx.listener(move |app, _, _, _| {
+                                    app.send(Command::MoveQueued {
+                                        index: i,
+                                        up: false,
+                                    });
+                                }),
+                            ))
+                            .child(small_button(
+                                SharedString::from(format!("q-remove-{i}")),
+                                "✕",
+                                cx.listener(move |app, _, _, _| {
+                                    app.send(Command::RemoveQueued(i));
+                                }),
+                            )),
                     )
-                    .when(self.queue_open, |body| {
-                        body.child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .flex()
-                                .flex_col()
-                                .border_l_1()
-                                .border_color(border())
-                                .child(
-                                    div()
-                                        .px(px(14.))
-                                        .py(px(10.))
-                                        .text_size(px(11.))
-                                        .text_color(rgb(MUTED))
-                                        .child(format!("UP NEXT ({})", snap.queue.len())),
-                                )
-                                .when(snap.queue.is_empty(), |panel| {
-                                    panel.child(
-                                        div()
-                                            .px(px(14.))
-                                            .text_size(px(12.))
-                                            .text_color(rgb(MUTED))
-                                            .child("Empty — add something from the results."),
-                                    )
-                                })
-                                .children(snap.queue.iter().enumerate().map(|(i, playable)| {
-                                    div()
-                                        .px(px(14.))
-                                        .py(px(7.))
-                                        .border_t_1()
-                                        .border_color(border())
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .text_size(px(12.))
-                                        .child(div().flex_1().overflow_hidden().child(format!(
-                                            "{}. {} — {}",
-                                            i + 1,
-                                            playable.title,
-                                            playable.artists_display()
-                                        )))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .gap(px(6.))
-                                                .child(small_button(
-                                                    SharedString::from(format!("q-up-{i}")),
-                                                    "↑",
-                                                    cx.listener(move |app, _, _, _| {
-                                                        app.send(Command::MoveQueued {
-                                                            index: i,
-                                                            up: true,
-                                                        });
-                                                    }),
-                                                ))
-                                                .child(small_button(
-                                                    SharedString::from(format!("q-down-{i}")),
-                                                    "↓",
-                                                    cx.listener(move |app, _, _, _| {
-                                                        app.send(Command::MoveQueued {
-                                                            index: i,
-                                                            up: false,
-                                                        });
-                                                    }),
-                                                ))
-                                                .child(small_button(
-                                                    SharedString::from(format!("q-remove-{i}")),
-                                                    "✕",
-                                                    cx.listener(move |app, _, _, _| {
-                                                        app.send(Command::RemoveQueued(i));
-                                                    }),
-                                                )),
-                                        )
-                                })),
-                        )
-                    }),
-            )
+            }))
     }
 
     fn render_now_playing(&self, snap: &Snapshot, cx: &Context<Self>) -> impl IntoElement {
@@ -927,7 +883,6 @@ fn open_player_window(cx: &mut App) {
                     root_focus: cx.focus_handle(),
                     search: TextField::new(cx, "Search Spotify…"),
                     paste: TextField::new(cx, "http://127.0.0.1:8989/login?code=…"),
-                    queue_open: true,
                 }
             });
             // Shortcuts work from the first frame, before any click.
@@ -968,7 +923,6 @@ fn main() {
             KeyBinding::new("cmd-left", PreviousTrack, None),
             KeyBinding::new("cmd-up", VolumeUp, None),
             KeyBinding::new("cmd-down", VolumeDown, None),
-            KeyBinding::new("cmd-k", ToggleQueuePanel, None),
         ]);
 
         // ⌘Q stops playback and flushes state cleanly. A `Subscription`
