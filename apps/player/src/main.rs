@@ -16,11 +16,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
-    SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
-    div, hsla, prelude::*, px, relative, rgb,
+    AnyElement, App, Bounds, ClipboardItem, Context, FontWeight, Hsla, IntoElement, KeyBinding,
+    ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, actions, div, hsla, prelude::*, px, relative, rgb,
 };
-use player_core::{Command, LibraryState, LoginState, Runtime, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime};
+use player_core::{
+    Command, LibraryState, LoginState, Runtime, SearchDetail, SearchState, SearchTarget, Snapshot,
+    fake::FakeRuntime,
+};
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
 
@@ -56,13 +59,7 @@ pub(crate) fn wash(alpha: f32) -> Hsla {
 
 actions!(
     player,
-    [
-        FocusSearch,
-        NextTrack,
-        PreviousTrack,
-        VolumeUp,
-        VolumeDown,
-    ]
+    [FocusSearch, NextTrack, PreviousTrack, VolumeUp, VolumeDown,]
 );
 
 static RUNTIME: OnceLock<Arc<dyn Runtime>> = OnceLock::new();
@@ -158,18 +155,6 @@ impl PlayerApp {
                 }
                 KeyOutcome::Edited => cx.notify(),
                 KeyOutcome::Blur => window.focus(&self.root_focus, cx),
-                KeyOutcome::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                KeyOutcome::Cut(text) => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    cx.notify();
-                }
-                KeyOutcome::Paste => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
-                        && field.paste(&text)
-                    {
-                        cx.notify();
-                    }
-                }
                 KeyOutcome::Ignored => {}
             }
             return;
@@ -250,14 +235,9 @@ impl Render for PlayerApp {
                     .flex()
                     .overflow_hidden()
                     .child(sidebar::render_sidebar(self, cx).into_any_element())
-                    .when_some(
-                        self.nav.library(),
-                        |row, section| {
-                            row.child(
-                                library::render_library(self, section, cx).into_any_element(),
-                            )
-                        },
-                    )
+                    .when_some(self.nav.library(), |row, section| {
+                        row.child(library::render_library(self, section, cx).into_any_element())
+                    })
                     .when(self.nav == sidebar::NavSection::Settings, |row| {
                         row.child(self.render_settings().into_any_element())
                     })
@@ -477,7 +457,8 @@ impl PlayerApp {
         let snap = &self.snapshot;
 
         // Search results column.
-        let results = if let Some(Some(target)) = self.search_history.get(self.search_history_index) {
+        let results = if let Some(Some(target)) = self.search_history.get(self.search_history_index)
+        {
             let mut rows = Vec::new();
             let name = match target {
                 SearchTarget::Artist { name, .. }
@@ -546,106 +527,123 @@ impl PlayerApp {
                 .overflow_y_scroll()
                 .children(rows)
                 .into_any_element()
-        } else { match &snap.search {
-            SearchState::Done { results, .. }
-                if !results.tracks.is_empty()
-                    || !results.artists.is_empty()
-                    || !results.albums.is_empty()
-                    || !results.playlists.is_empty() =>
-            {
-                let mut rows = Vec::new();
+        } else {
+            match &snap.search {
+                SearchState::Done { results, .. }
+                    if !results.tracks.is_empty()
+                        || !results.artists.is_empty()
+                        || !results.albums.is_empty()
+                        || !results.playlists.is_empty() =>
+                {
+                    let mut rows = Vec::new();
 
-                if !results.tracks.is_empty() {
-                    rows.push(search_heading("Tracks").into_any_element());
-                    rows.extend(results.tracks.iter().enumerate().map(|(i, playable)| {
-                        library::track_row(playable, None, i, cx).into_any_element()
-                    }));
+                    if !results.tracks.is_empty() {
+                        rows.push(search_heading("Tracks").into_any_element());
+                        rows.extend(results.tracks.iter().enumerate().map(|(i, playable)| {
+                            library::track_row(playable, None, i, cx).into_any_element()
+                        }));
+                    }
+                    if !results.artists.is_empty() {
+                        rows.push(search_heading("Artists").into_any_element());
+                        rows.extend(results.artists.iter().enumerate().map(|(i, artist)| {
+                            let target = SearchTarget::Artist {
+                                locator: artist.locator.clone(),
+                                name: artist.name.clone(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("artist-{i}")))
+                                .px(px(18.))
+                                .py(px(8.))
+                                .border_b_1()
+                                .border_color(border())
+                                .text_size(px(13.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.open_search_target(target.clone(), cx)
+                                }))
+                                .child(artist.name.clone())
+                                .into_any_element()
+                        }));
+                    }
+                    if !results.albums.is_empty() {
+                        rows.push(search_heading("Albums").into_any_element());
+                        rows.extend(results.albums.iter().enumerate().map(|(i, album)| {
+                            let target = SearchTarget::Album {
+                                locator: album.locator.clone(),
+                                name: album.name.clone(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("album-{i}")))
+                                .w_full()
+                                .px(px(14.))
+                                .py(px(8.))
+                                .border_b_1()
+                                .border_color(border())
+                                .flex()
+                                .items_center()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.open_search_target(target.clone(), cx)
+                                }))
+                                .child(library::two_line_cell(
+                                    album.name.clone(),
+                                    album.artists.join(", "),
+                                ))
+                                .into_any_element()
+                        }));
+                    }
+                    if !results.playlists.is_empty() {
+                        rows.push(search_heading("Playlists").into_any_element());
+                        rows.extend(results.playlists.iter().enumerate().map(|(i, playlist)| {
+                            let target = SearchTarget::Playlist {
+                                locator: playlist.locator.clone(),
+                                name: playlist.name.clone(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("playlist-{i}")))
+                                .w_full()
+                                .px(px(14.))
+                                .py(px(8.))
+                                .border_b_1()
+                                .border_color(border())
+                                .flex()
+                                .items_center()
+                                .text_size(px(13.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.open_search_target(target.clone(), cx)
+                                }))
+                                .child(library::two_line_cell(
+                                    playlist.name.clone(),
+                                    format!("{} · {} tracks", playlist.owner, playlist.track_count),
+                                ))
+                                .into_any_element()
+                        }));
+                    }
+                    div()
+                        .id("results")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(rows)
+                        .into_any_element()
                 }
-                if !results.artists.is_empty() {
-                    rows.push(search_heading("Artists").into_any_element());
-                    rows.extend(results.artists.iter().enumerate().map(|(i, artist)| {
-                        let target = SearchTarget::Artist { locator: artist.locator.clone(), name: artist.name.clone() };
-                        div()
-                            .id(SharedString::from(format!("artist-{i}")))
-                            .px(px(18.))
-                            .py(px(8.))
-                            .border_b_1()
-                            .border_color(border())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(tone(PANEL, 0.60)))
-                            .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
-                            .child(artist.name.clone())
-                            .into_any_element()
-                    }));
+                SearchState::Loading { query } => {
+                    status_row(format!("Searching “{query}”…")).into_any_element()
                 }
-                if !results.albums.is_empty() {
-                    rows.push(search_heading("Albums").into_any_element());
-                    rows.extend(results.albums.iter().enumerate().map(|(i, album)| {
-                        let target = SearchTarget::Album { locator: album.locator.clone(), name: album.name.clone() };
-                        div()
-                            .id(SharedString::from(format!("album-{i}")))
-                            .w_full()
-                            .px(px(14.))
-                            .py(px(8.))
-                            .border_b_1()
-                            .border_color(border())
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(tone(PANEL, 0.60)))
-                            .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
-                            .child(library::two_line_cell(
-                                album.name.clone(),
-                                album.artists.join(", "),
-                            ))
-                            .into_any_element()
-                    }));
+                SearchState::Failed { query, message } => {
+                    status_row_with_retry(format!("Search failed: {message}"), query.clone(), cx)
+                        .into_any_element()
                 }
-                if !results.playlists.is_empty() {
-                    rows.push(search_heading("Playlists").into_any_element());
-                    rows.extend(results.playlists.iter().enumerate().map(|(i, playlist)| {
-                        let target = SearchTarget::Playlist { locator: playlist.locator.clone(), name: playlist.name.clone() };
-                        div()
-                            .id(SharedString::from(format!("playlist-{i}")))
-                            .w_full()
-                            .px(px(14.))
-                            .py(px(8.))
-                            .border_b_1()
-                            .border_color(border())
-                            .flex()
-                            .items_center()
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(tone(PANEL, 0.60)))
-                            .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
-                            .child(library::two_line_cell(
-                                playlist.name.clone(),
-                                format!("{} · {} tracks", playlist.owner, playlist.track_count),
-                            ))
-                            .into_any_element()
-                    }));
+                SearchState::Done { .. } => {
+                    status_row("No results.".to_string()).into_any_element()
                 }
-                div()
-                    .id("results")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .into_any_element()
+                _ => div().into_any_element(),
             }
-            SearchState::Loading { query } => {
-                status_row(format!("Searching “{query}”…")).into_any_element()
-            }
-            SearchState::Failed { query, message } => {
-                status_row_with_retry(format!("Search failed: {message}"), query.clone(), cx)
-                    .into_any_element()
-            }
-            SearchState::Done { .. } => {
-                status_row("No results.".to_string()).into_any_element()
-            }
-            _ => div().into_any_element(),
-        }};
+        };
 
         div()
             .flex_1()
@@ -661,7 +659,13 @@ impl PlayerApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(search_nav_button("search-back", "←", self.search_history_index > 0, cx, -1))
+                    .child(search_nav_button(
+                        "search-back",
+                        "←",
+                        self.search_history_index > 0,
+                        cx,
+                        -1,
+                    ))
                     .child(search_nav_button(
                         "search-forward",
                         "→",
@@ -842,12 +846,15 @@ impl PlayerApp {
                     )),
             )
             .cursor_pointer()
-            .on_click(cx.listener(move |app, event: &gpui::ClickEvent, window, _| {
-                if duration_ms > 0 {
-                    let fraction = (event.position().x / window.viewport_size().width).clamp(0., 1.);
-                    app.send(Command::Seek((duration_ms as f32 * fraction) as u64));
-                }
-            }))
+            .on_click(
+                cx.listener(move |app, event: &gpui::ClickEvent, window, _| {
+                    if duration_ms > 0 {
+                        let fraction =
+                            (event.position().x / window.viewport_size().width).clamp(0., 1.);
+                        app.send(Command::Seek((duration_ms as f32 * fraction) as u64));
+                    }
+                }),
+            )
     }
 }
 
@@ -906,10 +913,15 @@ fn search_nav_button(
     cx: &Context<PlayerApp>,
     direction: isize,
 ) -> AnyElement {
-    small_button(SharedString::from(id), label, enabled, cx.listener(move |app, _, _, cx| {
+    small_button(
+        SharedString::from(id),
+        label,
+        enabled,
+        cx.listener(move |app, _, _, cx| {
             let index = app.search_history_index.saturating_add_signed(direction);
             app.move_search_history(index, cx);
-        }))
+        }),
+    )
     .into_any_element()
 }
 
@@ -1047,9 +1059,7 @@ fn open_player_window(cx: &mut App) {
                 // pump when playback resumes.
                 cx.spawn(async move |this, cx| {
                     loop {
-                        let playing = this.read_with(cx, |app, _| {
-                            app.snapshot.is_playing()
-                        })?;
+                        let playing = this.read_with(cx, |app, _| app.snapshot.is_playing())?;
                         if !playing {
                             // Sleep until the next snapshot event; re-check on wake.
                             if position_rx.changed().await.is_err() {

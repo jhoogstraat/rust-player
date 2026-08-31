@@ -3,8 +3,8 @@
 //! selection.
 
 use gpui::{
-    App, InteractiveElement, KeyDownEvent, ParentElement, SharedString, Styled, div, prelude::*,
-    px, rgb,
+    App, InteractiveElement, KeyDownEvent, MouseButton, ParentElement, SharedString, Styled, div,
+    prelude::*, px, rgb,
 };
 
 const MUTED: u32 = 0x8b8b91;
@@ -63,6 +63,15 @@ impl TextField {
         self.cursor += text.chars().count();
     }
 
+    pub fn paste(&mut self, text: &str) -> bool {
+        let text = text.lines().next().unwrap_or_default();
+        if text.is_empty() {
+            return false;
+        }
+        self.insert(text);
+        true
+    }
+
     /// Remove the character before the cursor.
     fn backspace(&mut self) {
         if self.cursor == 0 {
@@ -76,6 +85,9 @@ impl TextField {
 
     /// Remove the character under the cursor.
     fn delete(&mut self) {
+        if self.cursor == self.char_count() {
+            return;
+        }
         let start = self.byte_offset(self.cursor);
         let end = self.byte_offset(self.cursor + 1);
         self.value.replace_range(start..end, "");
@@ -125,9 +137,13 @@ impl TextField {
             self.value.clone().into()
         };
 
+        let focus = self.focus.clone();
         div()
             .id(id)
             .track_focus(&self.focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&focus, cx);
+            })
             .w_full()
             .h(px(34.))
             .px(px(10.))
@@ -140,5 +156,13 @@ impl TextField {
             .text_size(px(13.))
             .text_color(if focused { rgb(0xf4f4f5) } else { rgb(MUTED) })
             .child(display)
+    }
+
+    pub fn render_search(
+        &self,
+        id: &'static str,
+        window: &gpui::Window,
+    ) -> impl IntoElement + use<> {
+        self.render(id, window)
     }
 }
