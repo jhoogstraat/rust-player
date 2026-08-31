@@ -117,8 +117,11 @@ fn fake_runtime_answers_commands_with_snapshots() {
             .unwrap();
         match &done.search {
             SearchState::Done { results, .. } => {
-                assert_eq!(results.len(), 1);
-                assert_eq!(results[0].title, "Mr. Blue Sky");
+                assert_eq!(results.tracks.len(), 1);
+                assert_eq!(results.tracks[0].title, "Mr. Blue Sky");
+                assert_eq!(results.artists.len(), 1);
+                assert_eq!(results.albums.len(), 1);
+                assert_eq!(results.playlists.len(), 1);
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -157,7 +160,12 @@ fn search_without_hits_still_reports_done_with_empty_results() {
             .await
             .unwrap();
         match &done.search {
-            SearchState::Done { results, .. } => assert!(results.is_empty()),
+            SearchState::Done { results, .. } => {
+                assert!(results.tracks.is_empty());
+                assert!(results.artists.is_empty());
+                assert!(results.albums.is_empty());
+                assert!(results.playlists.is_empty());
+            }
             other => panic!("expected Done, got {other:?}"),
         }
         drop(done);

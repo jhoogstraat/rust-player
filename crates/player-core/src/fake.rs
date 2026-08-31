@@ -11,7 +11,8 @@ use tokio::sync::watch;
 
 use crate::{
     AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Playable,
-    PlaybackStatus, SearchState, Snapshot,
+    PlaybackStatus, SearchAlbum, SearchArtist, SearchPlaylist, SearchResults, SearchState,
+    Snapshot,
 };
 
 /// How long a scripted search stays in `Loading` so the state is visible.
@@ -28,7 +29,7 @@ fn canned_track(name: &str, artist: &str, album: &str, duration_ms: u64, id: &st
     }
 }
 
-fn canned_results() -> Vec<Playable> {
+fn canned_tracks() -> Vec<Playable> {
     vec![
         canned_track(
             "Mr. Blue Sky",
@@ -47,6 +48,27 @@ fn canned_results() -> Vec<Playable> {
     ]
 }
 
+fn canned_results() -> SearchResults {
+    SearchResults {
+        tracks: canned_tracks(),
+        artists: vec![SearchArtist {
+            locator: "spotify:artist:elo".to_string(),
+            name: "Electric Light Orchestra".to_string(),
+        }],
+        albums: vec![SearchAlbum {
+            locator: "spotify:album:outoftheblue".to_string(),
+            name: "Out of the Blue".to_string(),
+            artists: vec!["Electric Light Orchestra".to_string()],
+        }],
+        playlists: vec![SearchPlaylist {
+            locator: "spotify:playlist:bluesky".to_string(),
+            name: "Blue Sky Mix".to_string(),
+            owner: "Rust Player".to_string(),
+            track_count: 24,
+        }],
+    }
+}
+
 /// Canned rows per library section; the scripted library is static.
 fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
     // "Recently played" rows carry real Unix-millis stamps so relative-time
@@ -56,7 +78,7 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     match section {
-        LibrarySection::LikedSongs => canned_results()
+        LibrarySection::LikedSongs => canned_tracks()
             .into_iter()
             .chain([
                 canned_track(
@@ -79,7 +101,7 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
                 played_at_ms: None,
             })
             .collect(),
-        LibrarySection::RecentlyPlayed => canned_results()
+        LibrarySection::RecentlyPlayed => canned_tracks()
             .into_iter()
             .enumerate()
             .map(|(i, playable)| LibraryEntry::Track {
@@ -175,7 +197,8 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
         publish(state, tx);
         std::thread::sleep(SEARCH_DELAY);
         let needle = query.to_lowercase();
-        let results = canned_results()
+        let results: Vec<Playable> = canned_results()
+            .tracks
             .into_iter()
             .filter(|p| {
                 needle.is_empty()
@@ -183,6 +206,14 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
                     || p.artists_display().to_lowercase().contains(&needle)
             })
             .collect();
+        let results = if results.is_empty() {
+            SearchResults::default()
+        } else {
+            SearchResults {
+                tracks: results,
+                ..canned_results()
+            }
+        };
         state.lock().unwrap().search = SearchState::Done { query, results };
         publish(state, tx);
         return;
@@ -203,6 +234,7 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
     let mut snap = state.lock().unwrap();
     match command {
         Command::Search(_) | Command::Browse(_) => unreachable!("handled above"),
+        Command::OpenSearchTarget(_) => {}
         Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate => {
             snap.login = LoginState::Ready;
         }

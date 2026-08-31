@@ -11,7 +11,8 @@ use tokio::sync::watch;
 
 use player_core::{
     AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Notice, Playable,
-    PlaybackStatus, Runtime, SearchState, Snapshot, Source,
+    PlaybackStatus, Runtime, SearchAlbum, SearchArtist, SearchDetail, SearchPlaylist,
+    SearchResults, SearchState, SearchTarget, Snapshot, Source,
 };
 use spotatui::frontend::{self, ActionOutcome, EngineAction, LibraryTarget, Onboarding};
 
@@ -240,6 +241,21 @@ impl Runtime for SpotatuiPlayer {
                 self.with_frontend(|runtime| runtime.apply(EngineAction::SearchActiveSource(query)))
                     .is_some()
             }
+            Command::OpenSearchTarget(target) => self
+                .with_frontend(|runtime| {
+                    runtime.apply(EngineAction::Open(match target {
+                        SearchTarget::Artist { locator, name } => frontend::OpenTarget::Artist {
+                            id: locator,
+                            name,
+                        },
+                        SearchTarget::Album { locator, .. } => frontend::OpenTarget::Album(locator),
+                        SearchTarget::Playlist { locator, .. } => frontend::OpenTarget::Playlist {
+                            id: locator,
+                            from_search: true,
+                        },
+                    }))
+                })
+                .is_some(),
             Command::Reauthenticate => {
                 let staged = self
                     .with_frontend(|runtime| runtime.apply(EngineAction::BeginSpotifyLogin))
@@ -348,6 +364,7 @@ fn dispatch_command(runtime: &frontend::Runtime, command: Command) {
         // the fork expires it on its next tick.
         Command::DismissNotice => EngineAction::NotifyError(String::new(), 0),
         Command::Search(_)
+        | Command::OpenSearchTarget(_)
         | Command::SubmitPastedLoginUrl(_)
         | Command::Reauthenticate
         | Command::Browse(_) => {
@@ -447,6 +464,46 @@ mod tests {
             rx.borrow_and_update().search,
             SearchState::Loading { .. }
         ));
+    }
+
+    #[test]
+    fn maps_all_search_categories() {
+        let mut fork = idle_with_results();
+        fork.search_artists = vec![frontend::ArtistInfo {
+            name: "Artist".to_string(),
+            ..Default::default()
+        }];
+        fork.search_albums = vec![frontend::AlbumInfo {
+            name: "Album".to_string(),
+            artists: vec![frontend::ArtistRef {
+                name: "Artist".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        fork.search_playlists = vec![frontend::PlaylistInfo {
+            uri: "spotify:playlist:mix".to_string(),
+            name: "Mix".to_string(),
+            owner: "me".to_string(),
+            track_count: 3,
+            id: None,
+            owner_id: None,
+            collaborative: false,
+            public: None,
+            image_url: None,
+        }];
+
+        let Snapshot {
+            search: SearchState::Done { results, .. },
+            ..
+        } = map_snapshot(&fork, Some("query"))
+        else {
+            panic!("expected completed search");
+        };
+        assert_eq!(results.tracks.len(), 2);
+        assert_eq!(results.artists[0].name, "Artist");
+        assert_eq!(results.albums[0].artists, ["Artist"]);
+        assert_eq!(results.playlists[0].name, "Mix");
     }
 
     #[test]
@@ -581,14 +638,47 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
     let query = last_query.unwrap_or_default().to_string();
     let search = if fork.search_loading {
         SearchState::Loading { query }
-    } else if !fork.search_tracks.is_empty() {
+    } else if !fork.search_tracks.is_empty()
+        || !fork.search_artists.is_empty()
+        || !fork.search_albums.is_empty()
+        || !fork.search_playlists.is_empty()
+    {
         SearchState::Done {
             query,
-            results: fork
-                .search_tracks
-                .iter()
-                .filter_map(playable_from_track)
-                .collect(),
+            results: SearchResults {
+                tracks: fork
+                    .search_tracks
+                    .iter()
+                    .filter_map(playable_from_track)
+                    .collect(),
+                artists: fork
+                    .search_artists
+                    .iter()
+                    .map(|artist| SearchArtist {
+                        locator: artist.uri.clone().or_else(|| artist.id.clone()).unwrap_or_default(),
+                        name: artist.name.clone(),
+                    })
+                    .collect(),
+                albums: fork
+                    .search_albums
+                    .iter()
+                    .map(|album| SearchAlbum {
+                        locator: album.uri.clone().or_else(|| album.id.clone()).unwrap_or_default(),
+                        name: album.name.clone(),
+                        artists: album.artists.iter().map(|artist| artist.name.clone()).collect(),
+                    })
+                    .collect(),
+                playlists: fork
+                    .search_playlists
+                    .iter()
+                    .map(|playlist| SearchPlaylist {
+                        locator: playlist.uri.clone(),
+                        name: playlist.name.clone(),
+                        owner: playlist.owner.clone(),
+                        track_count: playlist.track_count,
+                    })
+                    .collect(),
+            },
         }
     } else if let (Some(query), Some(message)) = (last_query, error) {
         SearchState::Failed {
@@ -607,6 +697,26 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
             observed_at: fork.as_of,
             volume_percent: state.volume_percent,
         })
+    });
+
+    let search_detail = fork.search_detail.as_ref().map(|detail| match detail {
+        frontend::SearchDetail::Artist { tracks, albums } => SearchDetail::Artist {
+            tracks: tracks.iter().filter_map(playable_from_track).collect(),
+            albums: albums
+                .iter()
+                .map(|album| SearchAlbum {
+                    locator: album.uri.clone().or_else(|| album.id.clone()).unwrap_or_default(),
+                    name: album.name.clone(),
+                    artists: album.artists.iter().map(|artist| artist.name.clone()).collect(),
+                })
+                .collect(),
+        },
+        frontend::SearchDetail::Album { tracks } => SearchDetail::Album {
+            tracks: tracks.iter().filter_map(playable_from_track).collect(),
+        },
+        frontend::SearchDetail::Playlist { tracks } => SearchDetail::Playlist {
+            tracks: tracks.iter().filter_map(playable_from_track).collect(),
+        },
     });
 
     let queue = fork
@@ -630,6 +740,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
     Snapshot {
         login,
         search,
+        search_detail,
         playback,
         queue,
         library: LibraryState::Idle,

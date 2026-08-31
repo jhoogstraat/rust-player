@@ -20,7 +20,7 @@ pub(crate) const LIBRARY_MIN_WIDTH: f32 = 300.0;
 pub(crate) fn render_library(
     app: &PlayerApp,
     section: LibrarySection,
-    cx: &mut Context<PlayerApp>,
+    cx: &Context<PlayerApp>,
 ) -> impl IntoElement {
     let (count, body) = match &app.snapshot.library {
         LibraryState::Idle => (None, status_row("Choose a section.".to_string()).into_any_element()),
@@ -104,7 +104,7 @@ pub(crate) fn render_library(
 fn render_library_entry(
     entry: &LibraryEntry,
     index: usize,
-    cx: &mut Context<PlayerApp>,
+    cx: &Context<PlayerApp>,
 ) -> AnyElement {
     match entry {
         LibraryEntry::Track {
@@ -120,11 +120,11 @@ fn render_library_entry(
 }
 
 /// One playable track row: click plays, the chip enqueues.
-fn track_row(
+pub(crate) fn track_row(
     playable: &player_core::Playable,
     played_at_ms: Option<u64>,
     index: usize,
-    cx: &mut Context<PlayerApp>,
+    cx: &Context<PlayerApp>,
 ) -> impl IntoElement {
     let play = playable.clone();
     let enqueue = playable.clone();
@@ -191,7 +191,7 @@ fn track_row(
 fn enqueue_chip(
     index: usize,
     enqueue: player_core::Playable,
-    cx: &mut Context<PlayerApp>,
+    cx: &Context<PlayerApp>,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("library-enqueue-{index}")))

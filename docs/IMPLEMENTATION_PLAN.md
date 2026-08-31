@@ -116,7 +116,7 @@ Source is a separate version-two milestone.
 - The `Source` enum has one variant in version one. There is no capability vocabulary, source registry, or per-source trait: with one source every capability is always present, and a contract with no second implementor is speculation.
 - The snapshot is one value type that derives `Clone` and `PartialEq`:
   - `login`: `InProgress { message, wants_pasted_url }`, `Ready`, or `Expired { message }`.
-  - `search`: `Idle`, `Loading { query }`, `Done { query, results }`, or `Failed { query, message }`.
+  - `search`: `Idle`, `Loading { query }`, `Done { query, results }`, or `Failed { query, message }`. Completed results group tracks, artists, albums, and playlists; only track rows are playable or queueable.
   - `playback`: `None`, or the active Playable with `is_playing`, `position_ms`, `observed_at`, and `volume_percent`.
   - `queue`: the upcoming Playables in order.
   - `audio`: `Ready`, `Starting`, or `Unavailable { message }`.

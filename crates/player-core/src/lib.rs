@@ -42,6 +42,53 @@ impl Playable {
     }
 }
 
+/// A catalog artist result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchArtist {
+    pub locator: String,
+    pub name: String,
+}
+
+/// A catalog album result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchAlbum {
+    pub locator: String,
+    pub name: String,
+    pub artists: Vec<String>,
+}
+
+/// A catalog playlist result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchPlaylist {
+    pub locator: String,
+    pub name: String,
+    pub owner: String,
+    pub track_count: u32,
+}
+
+/// Catalog results grouped by Spotify content type.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchResults {
+    pub tracks: Vec<Playable>,
+    pub artists: Vec<SearchArtist>,
+    pub albums: Vec<SearchAlbum>,
+    pub playlists: Vec<SearchPlaylist>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchTarget {
+    Artist { locator: String, name: String },
+    Album { locator: String, name: String },
+    Playlist { locator: String, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchDetail {
+    Artist { tracks: Vec<Playable>, albums: Vec<SearchAlbum> },
+    Album { tracks: Vec<Playable> },
+    Playlist { tracks: Vec<Playable> },
+}
+
 /// A library section the navigation sidebar can browse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LibrarySection {
@@ -123,7 +170,7 @@ pub enum SearchState {
     },
     Done {
         query: String,
-        results: Vec<Playable>,
+        results: SearchResults,
     },
     Failed {
         query: String,
@@ -167,6 +214,7 @@ pub struct Notice {
 pub struct Snapshot {
     pub login: LoginState,
     pub search: SearchState,
+    pub search_detail: Option<SearchDetail>,
     pub playback: Option<PlaybackStatus>,
     /// Upcoming Playables in order.
     pub queue: Vec<Playable>,
@@ -184,6 +232,7 @@ impl Default for Snapshot {
                 wants_pasted_url: false,
             },
             search: SearchState::Idle,
+            search_detail: None,
             playback: None,
             queue: Vec::new(),
             library: LibraryState::Idle,
@@ -231,6 +280,7 @@ pub enum Command {
     SubmitPastedLoginUrl(String),
     Reauthenticate,
     Search(String),
+    OpenSearchTarget(SearchTarget),
     /// Show this sidebar section's listing; the answer arrives as
     /// `Snapshot::library`.
     Browse(LibrarySection),

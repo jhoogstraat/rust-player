@@ -16,11 +16,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
+    AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding, ParentElement, Render,
     SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
     div, hsla, prelude::*, px, relative, rgb,
 };
-use player_core::{Command, LibraryState, LoginState, Runtime, SearchState, Snapshot, fake::FakeRuntime};
+use player_core::{Command, LibraryState, LoginState, Runtime, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime};
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
 
@@ -90,6 +90,8 @@ struct PlayerApp {
     root_focus: gpui::FocusHandle,
     search: TextField,
     paste: TextField,
+    search_history: Vec<Option<SearchTarget>>,
+    search_history_index: usize,
 }
 
 impl PlayerApp {
@@ -98,6 +100,22 @@ impl PlayerApp {
         if !runtime.command(command.clone()) {
             log::warn!("[ui] runtime rejected {command:?}");
         }
+    }
+
+    fn open_search_target(&mut self, target: SearchTarget, cx: &mut Context<Self>) {
+        self.search_history.truncate(self.search_history_index + 1);
+        self.search_history.push(Some(target.clone()));
+        self.search_history_index += 1;
+        self.send(Command::OpenSearchTarget(target));
+        cx.notify();
+    }
+
+    fn move_search_history(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.search_history_index = index;
+        if let Some(target) = self.search_history[index].clone() {
+            self.send(Command::OpenSearchTarget(target));
+        }
+        cx.notify();
     }
 
     /// Route a keystroke: whichever text field has focus edits itself and may
@@ -127,11 +145,14 @@ impl PlayerApp {
                     let value = field.value.trim().to_string();
                     field.clear();
                     if !value.is_empty() {
-                        self.send(if is_search {
+                        let command = if is_search {
+                            self.search_history = vec![None];
+                            self.search_history_index = 0;
                             Command::Search(value)
                         } else {
                             Command::SubmitPastedLoginUrl(value)
-                        });
+                        };
+                        self.send(command);
                     }
                     cx.notify();
                 }
@@ -444,67 +465,119 @@ impl PlayerApp {
         let snap = &self.snapshot;
 
         // Search results column.
-        let results = match &snap.search {
-            SearchState::Done { results, .. } if !results.is_empty() => {
-                let rows: Vec<_> = results
-                    .iter()
-                    .enumerate()
-                    .map(|(i, playable)| {
-                        let play = playable.clone();
-                        let enqueue = playable.clone();
+        let results = if let Some(Some(target)) = self.search_history.get(self.search_history_index) {
+            let tracks = match &snap.search_detail {
+                Some(SearchDetail::Artist { tracks, .. })
+                | Some(SearchDetail::Album { tracks })
+                | Some(SearchDetail::Playlist { tracks }) => tracks.as_slice(),
+                None => &[],
+            };
+            let rows: Vec<_> = tracks
+                .iter()
+                .enumerate()
+                .map(|(i, track)| {
+                    let play = track.clone();
+                    div()
+                        .id(SharedString::from(format!("detail-track-{i}")))
+                        .px(px(18.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(border())
+                        .cursor_pointer()
+                        .hover(|style| style.bg(tone(PANEL, 0.60)))
+                        .on_click(cx.listener(move |app, _, _, _| app.send(Command::Play(play.clone()))))
+                        .child(format!("{} — {}", track.title, track.artists_display()))
+                        .into_any_element()
+                })
+                .collect();
+            div()
+                .id("search-detail")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(search_heading(match target {
+                    SearchTarget::Artist { name, .. }
+                    | SearchTarget::Album { name, .. }
+                    | SearchTarget::Playlist { name, .. } => name,
+                }))
+                .children(rows)
+                .into_any_element()
+        } else { match &snap.search {
+            SearchState::Done { results, .. }
+                if !results.tracks.is_empty()
+                    || !results.artists.is_empty()
+                    || !results.albums.is_empty()
+                    || !results.playlists.is_empty() =>
+            {
+                let mut rows = Vec::new();
+
+                if !results.tracks.is_empty() {
+                    rows.push(search_heading("Tracks").into_any_element());
+                    rows.extend(results.tracks.iter().enumerate().map(|(i, playable)| {
+                        library::track_row(playable, None, i, cx).into_any_element()
+                    }));
+                }
+                if !results.artists.is_empty() {
+                    rows.push(search_heading("Artists").into_any_element());
+                    rows.extend(results.artists.iter().enumerate().map(|(i, artist)| {
+                        let target = SearchTarget::Artist { locator: artist.locator.clone(), name: artist.name.clone() };
                         div()
-                            .id(SharedString::from(format!("result-{i}")))
+                            .id(SharedString::from(format!("artist-{i}")))
                             .px(px(18.))
                             .py(px(8.))
                             .border_b_1()
                             .border_color(border())
-                            .flex()
-                            .items_center()
-                            .justify_between()
+                            .text_size(px(13.))
                             .cursor_pointer()
                             .hover(|style| style.bg(tone(PANEL, 0.60)))
-                            .on_click(cx.listener(move |app, _, _, _| {
-                                app.send(Command::Play(play.clone()));
-                            }))
-                            .child(div().text_size(px(13.)).child(format!(
-                                "{} — {}",
-                                playable.title,
-                                playable.artists_display()
-                            )))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(MUTED))
-                                            .child(playable.album.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("enqueue-{i}")))
-                                            .px(px(8.))
-                                            .py(px(3.))
-                                            .rounded(px(5.))
-                                            .border_1()
-                                            .border_color(border())
-                                            .text_size(px(11.))
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(ACCENT)))
-                                            .on_click(cx.listener(move |app, _, _, cx| {
-                                                app.send(Command::Enqueue(enqueue.clone()));
-                                                cx.stop_propagation();
-                                            }))
-                                            .child("+ Queue"),
-                                    ),
-                            )
-                    })
-                    .collect();
+                            .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
+                            .child(artist.name.clone())
+                            .into_any_element()
+                    }));
+                }
+                if !results.albums.is_empty() {
+                    rows.push(search_heading("Albums").into_any_element());
+                    rows.extend(results.albums.iter().enumerate().map(|(i, album)| {
+                        let target = SearchTarget::Album { locator: album.locator.clone(), name: album.name.clone() };
+                        div()
+                            .id(SharedString::from(format!("album-{i}")))
+                            .px(px(18.))
+                            .py(px(8.))
+                            .border_b_1()
+                            .border_color(border())
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(tone(PANEL, 0.60)))
+                            .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
+                            .child(format!("{} — {}", album.name, album.artists.join(", ")))
+                            .into_any_element()
+                    }));
+                }
+                if !results.playlists.is_empty() {
+                    rows.push(search_heading("Playlists").into_any_element());
+                    rows.extend(results.playlists.iter().enumerate().map(|(i, playlist)| {
+                        let target = SearchTarget::Playlist { locator: playlist.locator.clone(), name: playlist.name.clone() };
+                        div()
+                            .id(SharedString::from(format!("playlist-{i}")))
+                            .px(px(18.))
+                            .py(px(8.))
+                            .border_b_1()
+                            .border_color(border())
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(tone(PANEL, 0.60)))
+                            .on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx)))
+                            .child(format!(
+                                "{} — {} · {} tracks",
+                                playlist.name, playlist.owner, playlist.track_count
+                            ))
+                            .into_any_element()
+                    }));
+                }
                 div()
-                    .max_h(px(240.))
                     .id("results")
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .children(rows)
                     .into_any_element()
@@ -516,11 +589,11 @@ impl PlayerApp {
                 status_row_with_retry(format!("Search failed: {message}"), query.clone(), cx)
                     .into_any_element()
             }
-            SearchState::Done { results, .. } if results.is_empty() => {
+            SearchState::Done { .. } => {
                 status_row("No results.".to_string()).into_any_element()
             }
             _ => div().into_any_element(),
-        };
+        }};
 
         div()
             .flex_1()
@@ -533,7 +606,18 @@ impl PlayerApp {
                     .px(px(18.))
                     .pt(px(14.))
                     .pb(px(10.))
-                    .child(input_shell_full(self.search.render("search-input", window))),
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(search_nav_button("search-back", "←", self.search_history_index > 0, cx, -1))
+                    .child(search_nav_button(
+                        "search-forward",
+                        "→",
+                        self.search_history_index + 1 < self.search_history.len(),
+                        cx,
+                        1,
+                    ))
+                    .child(div().flex_1().child(self.search.render("search-input", window))),
             )
             .child(
                 div()
@@ -597,6 +681,7 @@ impl PlayerApp {
                             .child(small_button(
                                 SharedString::from(format!("q-up-{i}")),
                                 "↑",
+                                true,
                                 cx.listener(move |app, _, _, _| {
                                     app.send(Command::MoveQueued { index: i, up: true });
                                 }),
@@ -604,6 +689,7 @@ impl PlayerApp {
                             .child(small_button(
                                 SharedString::from(format!("q-down-{i}")),
                                 "↓",
+                                true,
                                 cx.listener(move |app, _, _, _| {
                                     app.send(Command::MoveQueued {
                                         index: i,
@@ -614,6 +700,7 @@ impl PlayerApp {
                             .child(small_button(
                                 SharedString::from(format!("q-remove-{i}")),
                                 "✕",
+                                true,
                                 cx.listener(move |app, _, _, _| {
                                     app.send(Command::RemoveQueued(i));
                                 }),
@@ -727,12 +814,32 @@ fn status_row_with_retry(text: String, query: String, cx: &Context<PlayerApp>) -
         )
 }
 
-fn input_shell(child: impl IntoElement) -> impl IntoElement {
-    div().pb(px(10.)).max_w(px(480.)).child(child)
+fn search_heading(label: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .px(px(18.))
+        .pt(px(16.))
+        .pb(px(6.))
+        .text_size(px(11.))
+        .text_color(rgb(MUTED))
+        .child(label.into())
 }
 
-fn input_shell_full(child: impl IntoElement) -> impl IntoElement {
-    div().pb(px(10.)).w_full().child(child)
+fn search_nav_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    cx: &Context<PlayerApp>,
+    direction: isize,
+) -> AnyElement {
+    small_button(SharedString::from(id), label, enabled, cx.listener(move |app, _, _, cx| {
+            let index = app.search_history_index.saturating_add_signed(direction);
+            app.move_search_history(index, cx);
+        }))
+    .into_any_element()
+}
+
+fn input_shell(child: impl IntoElement) -> impl IntoElement {
+    div().pb(px(10.)).max_w(px(480.)).child(child)
 }
 
 fn button(
@@ -761,6 +868,7 @@ fn button(
 fn small_button(
     id: SharedString,
     label: &'static str,
+    enabled: bool,
     handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -771,9 +879,13 @@ fn small_button(
         .border_1()
         .border_color(border())
         .text_size(px(11.))
-        .cursor_pointer()
-        .hover(|style| style.bg(tone(PANEL, 0.60)))
-        .on_click(handler)
+        .text_color(rgb(if enabled { TEXT } else { MUTED }))
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                .on_click(handler)
+        })
         .child(label)
 }
 
@@ -887,6 +999,8 @@ fn open_player_window(cx: &mut App) {
                     root_focus: cx.focus_handle(),
                     search: TextField::new(cx, "Search Spotify…"),
                     paste: TextField::new(cx, "http://127.0.0.1:8989/login?code=…"),
+                    search_history: vec![None],
+                    search_history_index: 0,
                 }
             });
             // Shortcuts work from the first frame, before any click.
