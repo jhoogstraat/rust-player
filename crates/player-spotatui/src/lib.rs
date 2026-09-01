@@ -105,7 +105,7 @@ pub struct SpotatuiPlayer {
     retry_boot_tx: mpsc::Sender<()>,
 }
 
-/// Keeps catalog policy together while the engine owns Playback Session state.
+/// Keeps catalog policy together while the Playback Engine owns the Playback Session.
 #[derive(Default)]
 struct CatalogProjection {
     last_query: Option<String>,
@@ -118,11 +118,11 @@ impl CatalogProjection {
         self.last_query = Some(query);
     }
 
-    fn relay(&mut self, fork: &frontend::Snapshot) -> Snapshot {
-        let mut snapshot = map_snapshot(fork, self.last_query.as_deref());
+    fn relay(&mut self, engine_snapshot: &frontend::Snapshot) -> Snapshot {
+        let mut snapshot = map_snapshot(engine_snapshot, self.last_query.as_deref());
         snapshot.library = self
             .requested_library
-            .map(|section| map_library(fork, section))
+            .map(|section| map_library(engine_snapshot, section))
             .unwrap_or_default();
         self.revise(&mut snapshot);
         snapshot
@@ -133,13 +133,13 @@ impl CatalogProjection {
         self.with_library(current, LibraryState::Loading { section })
     }
 
-    fn cached_library(
+    fn project_cached_library(
         &mut self,
         current: Snapshot,
-        fork: &frontend::Snapshot,
+        engine_snapshot: &frontend::Snapshot,
         section: LibrarySection,
     ) -> Snapshot {
-        self.with_library(current, map_library(fork, section))
+        self.with_library(current, map_library(engine_snapshot, section))
     }
 
     fn with_library(&mut self, current: Snapshot, library: LibraryState) -> Snapshot {
@@ -321,8 +321,8 @@ impl SpotatuiPlayer {
         let implicit_queue = Arc::clone(&self.implicit_queue);
         runtime.handle().spawn(async move {
             loop {
-                let fork_snapshot = rx.borrow_and_update().clone();
-                let mut snapshot = catalog.lock().unwrap().relay(&fork_snapshot);
+                let engine_snapshot = rx.borrow_and_update().clone();
+                let mut snapshot = catalog.lock().unwrap().relay(&engine_snapshot);
                 snapshot.implicit_queue = map_implicit_queue(
                     implicit_queue.lock().unwrap().clone(),
                     snapshot.playback.as_ref(),
@@ -422,17 +422,18 @@ impl Runtime for SpotatuiPlayer {
                 // fork snapshot so an already-loaded startup cache is visible
                 // immediately instead of waiting for an unrelated change.
                 if section == LibrarySection::Playlists {
-                    if let Some(fork) = self.with_frontend(|runtime| {
+                    if let Some(engine_snapshot) = self.with_frontend(|runtime| {
                         let rx = runtime.subscribe();
                         rx.borrow().clone()
                     }) {
                         let current = self.tx.borrow().clone();
                         publish(
                             &self.tx,
-                            self.catalog
-                                .lock()
-                                .unwrap()
-                                .cached_library(current, &fork, section),
+                            self.catalog.lock().unwrap().project_cached_library(
+                                current,
+                                &engine_snapshot,
+                                section,
+                            ),
                         );
                     }
                 }
@@ -752,6 +753,76 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(first_detail_revision < refreshed_detail_revision);
+    }
+
+    #[test]
+    fn relayed_library_listings_keep_revisions_until_an_incomplete_state() {
+        let mut catalog = CatalogProjection::default();
+        let section = LibrarySection::LikedSongs;
+        assert!(matches!(
+            catalog.begin_library(Snapshot::default(), section).library,
+            LibraryState::Loading {
+                section: LibrarySection::LikedSongs
+            }
+        ));
+        let engine_snapshot = frontend::Snapshot {
+            library: frontend::LibrarySnapshot {
+                liked_songs: Some(vec![track("catalog")]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let first = catalog.relay(&engine_snapshot);
+        let first_revision = match first.library {
+            LibraryState::Done { revision, .. } => revision,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            catalog.relay(&engine_snapshot).library,
+            LibraryState::Done { revision, .. } if revision == first_revision
+        ));
+
+        assert!(matches!(
+            catalog.relay(&frontend::Snapshot::default()).library,
+            LibraryState::Loading {
+                section: LibrarySection::LikedSongs
+            }
+        ));
+        assert!(matches!(
+            catalog.relay(&engine_snapshot).library,
+            LibraryState::Done { revision, .. } if revision > first_revision
+        ));
+    }
+
+    #[test]
+    fn relayed_catalog_failure_keeps_playback_healthy() {
+        let mut catalog = CatalogProjection::default();
+        catalog.begin_library(Snapshot::default(), LibrarySection::LikedSongs);
+        let snapshot = catalog.relay(&frontend::Snapshot {
+            notice: Some("offline".to_string()),
+            notice_is_error: true,
+            spotify_connected: true,
+            audio_ready: true,
+            playback: Some(frontend::PlaybackState {
+                track: Some(track("playing")),
+                is_playing: true,
+                progress_ms: 5,
+                shuffle: false,
+                repeat: "off".to_string(),
+                volume_percent: None,
+                device: None,
+            }),
+            ..Default::default()
+        });
+
+        assert!(matches!(snapshot.library, LibraryState::Failed { .. }));
+        assert_eq!(snapshot.login, LoginState::Ready);
+        assert_eq!(snapshot.audio, AudioState::Ready);
+        assert!(matches!(
+            snapshot.playback,
+            Some(PlaybackStatus { playable, .. }) if playable.locator == "spotify:track:playing"
+        ));
     }
 
     #[test]
