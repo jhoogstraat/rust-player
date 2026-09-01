@@ -1,4 +1,4 @@
-![Rust Player — native music player window over a purple statue wallpaper](screenshot.png)
+![Rust Player — native music player window over a purple statue wallpaper](screenshot.jpg)
 
 # Rust Player
 
