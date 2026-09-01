@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{
     Anchor, AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding,
@@ -573,6 +573,9 @@ fn clock(ms: u64) -> String {
 
 impl Render for PlayerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.snapshot.is_playing() {
+            window.request_animation_frame();
+        }
         let snap = &self.snapshot;
 
         div()
@@ -1485,7 +1488,6 @@ fn open_player_window(cx: &mut App) {
         },
         |window, cx| {
             let mut rx = runtime.subscribe();
-            let mut position_rx = runtime.subscribe();
             let app = cx.new(|cx| {
                 // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
@@ -1518,32 +1520,6 @@ fn open_player_window(cx: &mut App) {
                             break;
                         }
                     }
-                })
-                .detach();
-
-                // Position projection (ticket 13): while playing, the window
-                // redraws on animation frames so `projected_position_ms(now)`
-                // renders smoothly; paused/idle windows schedule nothing and
-                // receive no wakes at all. Snapshot events above restart the
-                // pump when playback resumes.
-                cx.spawn(async move |this, cx| {
-                    loop {
-                        let playing = this.read_with(cx, |app, _| app.snapshot.is_playing())?;
-                        if !playing {
-                            // Sleep until the next snapshot event; re-check on wake.
-                            if position_rx.changed().await.is_err() {
-                                break;
-                            }
-                            continue;
-                        }
-                        this.update(cx, |_, cx| {
-                            cx.notify();
-                        })?;
-                        cx.background_executor()
-                            .timer(Duration::from_millis(250))
-                            .await;
-                    }
-                    anyhow::Ok(())
                 })
                 .detach();
 

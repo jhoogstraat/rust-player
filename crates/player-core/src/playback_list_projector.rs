@@ -104,6 +104,12 @@ impl PlaybackListProjector {
             LibrarySection::RecentlyPlayed => PlaybackListSource::RecentlyPlayed,
             LibrarySection::Playlists => return self.clear(),
         };
+        if let Some(cached) = &self.cached
+            && cached.source == source
+            && cached.revision == *revision
+        {
+            return Some(Arc::clone(&cached.list));
+        }
         let tracks = entries
             .iter()
             .filter_map(|entry| match entry {
@@ -276,6 +282,25 @@ mod tests {
         };
         let library_list = projector.project_library(&library).unwrap();
         assert_eq!(library_list.source, PlaybackListSource::LikedSongs);
+    }
+
+    #[test]
+    fn unchanged_library_revision_reuses_before_cloning_entries() {
+        let mut projector = PlaybackListProjector::default();
+        let library = |title| LibraryState::Done {
+            section: LibrarySection::LikedSongs,
+            revision: CatalogRevision::new(1),
+            entries: vec![LibraryEntry::Track {
+                playable: playable(Source::Spotify, title),
+                played_at_ms: None,
+            }],
+        };
+
+        let first = projector.project_library(&library("first")).unwrap();
+        let reused = projector.project_library(&library("changed")).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &reused));
+        assert_eq!(reused.tracks[0].title, "first");
     }
 
     #[test]

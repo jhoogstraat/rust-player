@@ -263,7 +263,7 @@ pub enum SearchState {
 
 /// The active Playable and where it stands. `position_ms` paired with
 /// `observed_at` is authoritative at publish time; while playing, the UI
-/// projects locally between snapshots so a 250 ms tick is smooth on screen.
+/// projects locally between snapshots on presentation animation frames.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaybackStatus {
     pub playable: Playable,
