@@ -10,10 +10,24 @@
 //! This crate depends on nothing heavier than `tokio::sync`.
 
 pub mod fake;
+pub mod playback_list_projector;
+
+pub use playback_list_projector::PlaybackListProjector;
 
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
+
+/// An opaque, monotonic revision assigned by a Music Source when it accepts a
+/// completed catalog listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CatalogRevision(u64);
+
+impl CatalogRevision {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
 
 /// A Music Source. One variant in version one: with one source every
 /// capability is always present, so there is no capability vocabulary yet.
@@ -97,13 +111,16 @@ pub enum SearchTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchDetail {
     Artist {
+        revision: CatalogRevision,
         tracks: Vec<Playable>,
         albums: Vec<SearchAlbum>,
     },
     Album {
+        revision: CatalogRevision,
         tracks: Vec<Playable>,
     },
     Playlist {
+        revision: CatalogRevision,
         tracks: Vec<Playable>,
     },
 }
@@ -202,6 +219,7 @@ pub enum LibraryState {
     },
     Done {
         section: LibrarySection,
+        revision: CatalogRevision,
         entries: Vec<LibraryEntry>,
     },
     Failed {
@@ -234,6 +252,7 @@ pub enum SearchState {
     },
     Done {
         query: String,
+        revision: CatalogRevision,
         results: SearchResults,
     },
     Failed {

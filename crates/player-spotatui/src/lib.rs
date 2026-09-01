@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::watch;
 
 use player_core::{
-    AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Notice, Playable,
-    PlaybackList, PlaybackStatus, Runtime, SearchAlbum, SearchArtist, SearchDetail, SearchPlaylist,
-    SearchResults, SearchState, SearchTarget, Snapshot, Source,
+    AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
+    Notice, Playable, PlaybackList, PlaybackListProjector, PlaybackStatus, Runtime, SearchAlbum,
+    SearchArtist, SearchDetail, SearchPlaylist, SearchResults, SearchState, SearchTarget, Snapshot,
+    Source,
 };
 use spotatui::frontend::{self, ActionOutcome, EngineAction, LibraryTarget, Onboarding};
 
@@ -108,6 +109,87 @@ pub struct SpotatuiPlayer {
     retry_boot_tx: mpsc::Sender<()>,
 }
 
+#[derive(Default)]
+struct RevisionTracker {
+    next: u64,
+    search: Option<(String, SearchResults, CatalogRevision)>,
+    detail: Option<(SearchDetail, CatalogRevision)>,
+    library: Option<(LibrarySection, Vec<LibraryEntry>, CatalogRevision)>,
+}
+
+impl RevisionTracker {
+    fn next(&mut self) -> CatalogRevision {
+        self.next += 1;
+        CatalogRevision::new(self.next)
+    }
+
+    fn revise(&mut self, snapshot: &mut Snapshot) {
+        match &mut snapshot.search {
+            SearchState::Done {
+                query,
+                revision,
+                results,
+            } => {
+                let value = self
+                    .search
+                    .as_ref()
+                    .and_then(|(old_query, old_results, revision)| {
+                        (old_query == query && old_results == results).then_some(*revision)
+                    })
+                    .unwrap_or_else(|| self.next());
+                *revision = value;
+                self.search = Some((query.clone(), results.clone(), value));
+            }
+            _ => self.search = None,
+        }
+        match &mut snapshot.search_detail {
+            Some(detail) => {
+                let raw = detail.clone();
+                let value = self
+                    .detail
+                    .as_ref()
+                    .and_then(|(old, revision)| (old == &raw).then_some(*revision))
+                    .unwrap_or_else(|| self.next());
+                set_detail_revision(detail, value);
+                self.detail = Some((raw, value));
+            }
+            None => self.detail = None,
+        }
+        match &mut snapshot.library {
+            LibraryState::Done {
+                section,
+                revision,
+                entries,
+            } => {
+                let value = self
+                    .library
+                    .as_ref()
+                    .and_then(|(old_section, old_entries, revision)| {
+                        (old_section == section && old_entries == entries).then_some(*revision)
+                    })
+                    .unwrap_or_else(|| self.next());
+                *revision = value;
+                self.library = Some((*section, entries.clone(), value));
+            }
+            _ => self.library = None,
+        }
+    }
+}
+
+fn set_detail_revision(detail: &mut SearchDetail, revision: CatalogRevision) {
+    match detail {
+        SearchDetail::Artist {
+            revision: current, ..
+        }
+        | SearchDetail::Album {
+            revision: current, ..
+        }
+        | SearchDetail::Playlist {
+            revision: current, ..
+        } => *current = revision,
+    }
+}
+
 /// Connect to the real runtime. Returns immediately; sign-in progress flows
 /// through the returned channel while `boot` runs on a dedicated blocking
 /// thread (its `Onboarding` is synchronous). A failed boot parks that thread
@@ -195,6 +277,7 @@ impl SpotatuiPlayer {
         let last_query = Arc::clone(&self.last_query);
         let requested_library = Arc::clone(&self.requested_library);
         let implicit_queue = Arc::clone(&self.implicit_queue);
+        let revisions = Arc::new(Mutex::new(RevisionTracker::default()));
         runtime.handle().spawn(async move {
             loop {
                 let fork_snapshot = rx.borrow_and_update().clone();
@@ -205,6 +288,7 @@ impl SpotatuiPlayer {
                     .unwrap()
                     .map(|section| map_library(&fork_snapshot, section))
                     .unwrap_or_default();
+                revisions.lock().unwrap().revise(&mut snapshot);
                 snapshot.implicit_queue = map_implicit_queue(
                     implicit_queue.lock().unwrap().clone(),
                     snapshot.playback.as_ref(),
@@ -652,7 +736,8 @@ mod tests {
             liked,
             LibraryState::Done {
                 section: LibrarySection::LikedSongs,
-                entries
+                entries,
+                ..
             } if matches!(entries.as_slice(), [LibraryEntry::Track { playable, played_at_ms: None }]
                 if playable.locator == "spotify:track:liked")
         ));
@@ -662,7 +747,8 @@ mod tests {
             playlists,
             LibraryState::Done {
                 section: LibrarySection::Playlists,
-                entries
+                entries,
+                ..
             } if matches!(entries.as_slice(), [LibraryEntry::Playlist { id, name, track_count }]
                 if id == "mix" && name == "Mix" && *track_count == 3)
         ));
@@ -727,7 +813,11 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
     };
 
     match entries {
-        Some(entries) => LibraryState::Done { section, entries },
+        Some(entries) => LibraryState::Done {
+            section,
+            revision: CatalogRevision::new(0),
+            entries,
+        },
         None => LibraryState::Loading { section },
     }
 }
@@ -765,6 +855,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
     {
         SearchState::Done {
             query,
+            revision: CatalogRevision::new(0),
             results: SearchResults {
                 tracks: fork
                     .search_tracks
@@ -833,6 +924,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
 
     let search_detail = fork.search_detail.as_ref().map(|detail| match detail {
         frontend::SearchDetail::Artist { tracks, albums } => SearchDetail::Artist {
+            revision: CatalogRevision::new(0),
             tracks: tracks.iter().filter_map(playable_from_track).collect(),
             albums: albums
                 .iter()
@@ -852,9 +944,11 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
                 .collect(),
         },
         frontend::SearchDetail::Album { tracks } => SearchDetail::Album {
+            revision: CatalogRevision::new(0),
             tracks: tracks.iter().filter_map(playable_from_track).collect(),
         },
         frontend::SearchDetail::Playlist { tracks } => SearchDetail::Playlist {
+            revision: CatalogRevision::new(0),
             tracks: tracks.iter().filter_map(playable_from_track).collect(),
         },
     });
@@ -898,13 +992,7 @@ fn map_implicit_queue(
     playback: Option<&PlaybackStatus>,
 ) -> Option<PlaybackList> {
     if let (Some(list), Some(playback)) = (list.as_mut(), playback) {
-        if let Some(index) = list
-            .tracks
-            .iter()
-            .position(|track| track.locator == playback.playable.locator)
-        {
-            list.current_index = index;
-        }
+        PlaybackListProjector::align_cursor(list, &playback.playable);
     }
     list
 }

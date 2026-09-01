@@ -888,7 +888,7 @@ impl PlayerApp {
                     .into_any_element(),
             );
             match &snap.search_detail {
-                Some(SearchDetail::Artist { tracks, albums }) => {
+                Some(SearchDetail::Artist { tracks, albums, .. }) => {
                     let list = playback_list(
                         PlaybackListSource::Artist {
                             locator: match target {
@@ -948,7 +948,8 @@ impl PlayerApp {
                         }));
                     }
                 }
-                Some(SearchDetail::Album { tracks }) | Some(SearchDetail::Playlist { tracks }) => {
+                Some(SearchDetail::Album { tracks, .. })
+                | Some(SearchDetail::Playlist { tracks, .. }) => {
                     let source = match target {
                         SearchTarget::Album { locator, .. } => PlaybackListSource::Album {
                             locator: locator.clone(),
@@ -980,7 +981,7 @@ impl PlayerApp {
                 .into_any_element()
         } else {
             match &snap.search {
-                SearchState::Done { query, results }
+                SearchState::Done { query, results, .. }
                     if !results.tracks.is_empty()
                         || !results.artists.is_empty()
                         || !results.albums.is_empty()

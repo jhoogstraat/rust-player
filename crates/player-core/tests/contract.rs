@@ -258,6 +258,7 @@ fn fake_runtime_browses_every_library_section() {
                 LibraryState::Done {
                     section: done_section,
                     entries,
+                    ..
                 } => {
                     assert_eq!(*done_section, section);
                     assert!(!entries.is_empty(), "section {section:?}");
@@ -281,6 +282,66 @@ fn fake_runtime_browses_every_library_section() {
             }
             drop(done);
         }
+        runtime.shutdown();
+    });
+}
+
+#[test]
+fn fake_catalog_refresh_replaces_candidate_but_preserves_active_implicit_list() {
+    block_on(async {
+        let runtime = player_core::fake::FakeRuntime::new();
+        let mut rx = runtime.subscribe();
+        let first = playable();
+        let mut second = playable();
+        second.locator = "spotify:track:second".to_string();
+        let list = PlaybackList {
+            source: PlaybackListSource::LikedSongs,
+            tracks: vec![first.clone(), second.clone()].into(),
+            current_index: 0,
+        };
+
+        runtime.command(Command::PlayFromList {
+            list: Arc::new(list),
+            index: 0,
+        });
+        rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&first))
+            .await
+            .unwrap();
+        let active = rx.borrow().implicit_queue.clone().unwrap();
+
+        runtime.command(Command::Search("blue".to_string()));
+        let loading = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Loading { .. }))
+            .await
+            .unwrap();
+        assert_eq!(loading.implicit_queue.as_ref(), Some(&active));
+        assert!(runtime.candidate_list().is_none());
+        drop(loading);
+        let first_done = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Done { .. }))
+            .await
+            .unwrap();
+        let first_revision = match &first_done.search {
+            SearchState::Done { revision, .. } => *revision,
+            _ => unreachable!(),
+        };
+        drop(first_done);
+        let first_candidate = runtime.candidate_list().unwrap();
+
+        runtime.command(Command::Search("blue".to_string()));
+        let refreshed = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Done { revision, .. } if revision != first_revision))
+            .await
+            .unwrap();
+        assert_eq!(refreshed.implicit_queue.as_ref(), Some(&active));
+        drop(refreshed);
+        let refreshed_candidate = runtime.candidate_list().unwrap();
+        assert!(!Arc::ptr_eq(&first_candidate, &refreshed_candidate));
+
+        runtime.command(Command::Next);
+        rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&second))
+            .await
+            .unwrap();
         runtime.shutdown();
     });
 }

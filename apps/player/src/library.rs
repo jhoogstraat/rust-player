@@ -138,7 +138,10 @@ fn render_library_entry(
 }
 
 pub(crate) fn playback_list_for_state(state: &LibraryState) -> Option<Arc<PlaybackList>> {
-    let LibraryState::Done { section, entries } = state else {
+    let LibraryState::Done {
+        section, entries, ..
+    } = state
+    else {
         return None;
     };
     playback_list_for_library(*section, entries)
@@ -421,6 +424,7 @@ mod tests {
     fn state() -> LibraryState {
         LibraryState::Done {
             section: LibrarySection::LikedSongs,
+            revision: player_core::CatalogRevision::new(1),
             entries: vec![LibraryEntry::Track {
                 playable: Playable {
                     source: Source::Spotify,

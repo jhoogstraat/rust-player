@@ -2,7 +2,7 @@
 //! hardware. It answers every command the window can send, so UI behavior
 //! is exercisable end to end.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::{
-    AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Playable,
-    PlaybackStatus, SearchAlbum, SearchArtist, SearchPlaylist, SearchResults, SearchState,
-    Snapshot,
+    AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
+    Playable, PlaybackList, PlaybackListProjector, PlaybackStatus, SearchAlbum, SearchArtist,
+    SearchPlaylist, SearchResults, SearchState, Snapshot,
 };
 
 /// How long a scripted search stays in `Loading` so the state is visible.
@@ -136,6 +136,7 @@ pub struct FakeRuntime {
     tx: watch::Sender<Snapshot>,
     commands: mpsc::Sender<Command>,
     state: Arc<Mutex<Snapshot>>,
+    projector: Arc<Mutex<PlaybackListProjector>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -150,17 +151,27 @@ impl FakeRuntime {
         let (tx, _rx) = watch::channel(initial.clone());
         let (commands, command_rx) = mpsc::channel::<Command>();
         let state = Arc::new(Mutex::new(initial));
+        let projector = Arc::new(Mutex::new(PlaybackListProjector::default()));
+        let next_revision = Arc::new(AtomicU64::new(1));
         let stop = Arc::new(AtomicBool::new(false));
 
         let worker_state = Arc::clone(&state);
         let worker_tx = tx.clone();
         let worker_stop = Arc::clone(&stop);
+        let worker_projector = Arc::clone(&projector);
+        let worker_revision = Arc::clone(&next_revision);
         std::thread::Builder::new()
             .name("player-fake-runtime".into())
             .spawn(move || {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match command_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(command) => apply(&worker_state, &worker_tx, command),
+                        Ok(command) => apply(
+                            &worker_state,
+                            &worker_tx,
+                            &worker_projector,
+                            &worker_revision,
+                            command,
+                        ),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
@@ -172,14 +183,35 @@ impl FakeRuntime {
             tx,
             commands,
             state,
+            projector,
             stop,
         }
     }
 
     /// Force one exact snapshot (scripted scenarios for failure states).
     pub fn script_snapshot(&self, snapshot: Snapshot) {
+        let mut projector = self.projector.lock().unwrap();
+        if matches!(
+            snapshot.search,
+            SearchState::Loading { .. } | SearchState::Failed { .. }
+        ) || matches!(
+            snapshot.library,
+            LibraryState::Loading { .. } | LibraryState::Failed { .. }
+        ) {
+            projector.clear();
+        } else if matches!(snapshot.search, SearchState::Done { .. }) {
+            projector.project_search(&snapshot.search);
+        } else if matches!(snapshot.library, LibraryState::Done { .. }) {
+            projector.project_library(&snapshot.library);
+        }
+        drop(projector);
         *self.state.lock().unwrap() = snapshot;
         publish(&self.state, &self.tx);
+    }
+
+    /// The completed catalog candidate held by the fake's projector.
+    pub fn candidate_list(&self) -> Option<Arc<PlaybackList>> {
+        self.projector.lock().unwrap().candidate()
     }
 }
 
@@ -189,8 +221,15 @@ impl Default for FakeRuntime {
     }
 }
 
-fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command) {
+fn apply(
+    state: &Mutex<Snapshot>,
+    tx: &watch::Sender<Snapshot>,
+    projector: &Mutex<PlaybackListProjector>,
+    next_revision: &AtomicU64,
+    command: Command,
+) {
     if let Command::Search(query) = command {
+        projector.lock().unwrap().clear();
         state.lock().unwrap().search = SearchState::Loading {
             query: query.clone(),
         };
@@ -214,19 +253,29 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
                 ..canned_results()
             }
         };
-        state.lock().unwrap().search = SearchState::Done { query, results };
+        let done = SearchState::Done {
+            query,
+            revision: CatalogRevision::new(next_revision.fetch_add(1, Ordering::Relaxed)),
+            results,
+        };
+        projector.lock().unwrap().project_search(&done);
+        state.lock().unwrap().search = done;
         publish(state, tx);
         return;
     }
 
     if let Command::Browse(section) = command {
+        projector.lock().unwrap().clear();
         state.lock().unwrap().library = LibraryState::Loading { section };
         publish(state, tx);
         std::thread::sleep(SEARCH_DELAY);
-        state.lock().unwrap().library = LibraryState::Done {
+        let done = LibraryState::Done {
             section,
+            revision: CatalogRevision::new(next_revision.fetch_add(1, Ordering::Relaxed)),
             entries: canned_library(section),
         };
+        projector.lock().unwrap().project_library(&done);
+        state.lock().unwrap().library = done;
         publish(state, tx);
         return;
     }
