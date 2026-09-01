@@ -11,8 +11,7 @@ use gpui::{
     SharedString, Styled, div, prelude::*, px, uniform_list,
 };
 use player_core::{
-    Command, LibraryEntry, LibrarySection, LibraryState, PlaybackList, PlaybackListSource,
-    SearchTarget,
+    Command, LibraryEntry, LibrarySection, LibraryState, PlaybackList, SearchTarget,
 };
 
 use crate::{ACCENT, MUTED, PANEL, PlayerApp, border, rgb, tone};
@@ -26,6 +25,10 @@ pub(crate) fn render_library(
     section: LibrarySection,
     cx: &Context<PlayerApp>,
 ) -> impl IntoElement {
+    let playback_list = app
+        .playback_list_projector
+        .borrow_mut()
+        .project_library(&app.snapshot.library);
     let (count, body) = match &app.snapshot.library {
         LibraryState::Idle => (
             None,
@@ -39,11 +42,6 @@ pub(crate) fn render_library(
         }
         LibraryState::Done { entries, .. } => {
             let count = Some(entries.len());
-            let playback_list = app
-                .library_playback_list
-                .as_ref()
-                .filter(|list| playback_list_matches_section(&list.source, section))
-                .cloned();
             (
                 count,
                 // Each library section contains one row shape, so the
@@ -135,73 +133,6 @@ fn render_library_entry(
             ..
         } => playlist_row(id, name, *track_count, index, cx).into_any_element(),
     }
-}
-
-pub(crate) fn playback_list_for_state(state: &LibraryState) -> Option<Arc<PlaybackList>> {
-    let LibraryState::Done {
-        section, entries, ..
-    } = state
-    else {
-        return None;
-    };
-    playback_list_for_library(*section, entries)
-}
-
-pub(crate) fn update_library_playback_list_cache(
-    cached: &mut Option<Arc<PlaybackList>>,
-    cached_section: &mut Option<LibrarySection>,
-    state: &LibraryState,
-) {
-    let next_section = match state {
-        LibraryState::Done { section, .. } => Some(*section),
-        LibraryState::Idle | LibraryState::Loading { .. } | LibraryState::Failed { .. } => None,
-    };
-    if *cached_section != next_section {
-        // LibraryState guarantees Loading/Failed before a refreshed Done
-        // state, so a stable Done section is a cache hit without scanning its
-        // entries on every playback snapshot.
-        // ponytail: lifecycle-keyed cache; add a catalog revision if Done can
-        // ever refresh in place without a Loading state.
-        *cached_section = next_section;
-        *cached = playback_list_for_state(state);
-    }
-}
-
-pub(crate) fn playback_list_for_library(
-    section: LibrarySection,
-    entries: &[LibraryEntry],
-) -> Option<Arc<PlaybackList>> {
-    let tracks = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            LibraryEntry::Track { playable, .. } => Some(playable.clone()),
-            LibraryEntry::Playlist { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    if tracks.is_empty() {
-        return None;
-    }
-    let source = match section {
-        LibrarySection::LikedSongs => PlaybackListSource::LikedSongs,
-        LibrarySection::RecentlyPlayed => PlaybackListSource::RecentlyPlayed,
-        LibrarySection::Playlists => return None,
-    };
-    Some(Arc::new(PlaybackList {
-        source,
-        tracks: tracks.into(),
-        current_index: 0,
-    }))
-}
-
-fn playback_list_matches_section(source: &PlaybackListSource, section: LibrarySection) -> bool {
-    matches!(
-        (source, section),
-        (PlaybackListSource::LikedSongs, LibrarySection::LikedSongs)
-            | (
-                PlaybackListSource::RecentlyPlayed,
-                LibrarySection::RecentlyPlayed
-            )
-    )
 }
 
 /// One playable track row: click plays, the chip enqueues.
@@ -414,61 +345,4 @@ fn time_ago(unix_ms: u64) -> String {
 fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use player_core::{Playable, Source};
-
-    fn state() -> LibraryState {
-        LibraryState::Done {
-            section: LibrarySection::LikedSongs,
-            revision: player_core::CatalogRevision::new(1),
-            entries: vec![LibraryEntry::Track {
-                playable: Playable {
-                    source: Source::Spotify,
-                    locator: "spotify:track:test".to_string(),
-                    title: "Test".to_string(),
-                    artists: vec!["Artist".to_string()],
-                    album: "Album".to_string(),
-                    duration_ms: 1_000,
-                },
-                played_at_ms: None,
-            }],
-        }
-    }
-
-    #[test]
-    fn unchanged_library_state_reuses_cached_playback_list() {
-        let next = state();
-        let mut cached = playback_list_for_state(&next);
-        let mut cached_section = Some(LibrarySection::LikedSongs);
-        let original = cached.clone().expect("test state has a track");
-
-        update_library_playback_list_cache(&mut cached, &mut cached_section, &next);
-
-        assert!(Arc::ptr_eq(
-            &original,
-            cached.as_ref().expect("cached list remains present")
-        ));
-    }
-
-    #[test]
-    fn library_lifecycle_invalidates_cached_playback_list() {
-        let next = state();
-        let mut cached = playback_list_for_state(&next);
-        let mut cached_section = Some(LibrarySection::LikedSongs);
-
-        update_library_playback_list_cache(
-            &mut cached,
-            &mut cached_section,
-            &LibraryState::Loading {
-                section: LibrarySection::LikedSongs,
-            },
-        );
-
-        assert!(cached.is_none());
-        assert_eq!(cached_section, None);
-    }
 }

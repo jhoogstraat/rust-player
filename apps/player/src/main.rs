@@ -11,6 +11,7 @@ mod logging;
 mod sidebar;
 mod text_input;
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -23,8 +24,8 @@ use gpui::{
     div, hsla, prelude::*, px, relative, rgb, uniform_list,
 };
 use player_core::{
-    Command, LibrarySection, LibraryState, LoginState, Playable, PlaybackList, PlaybackListSource,
-    Runtime, SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
+    Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListProjector, Runtime,
+    SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
 };
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
@@ -92,8 +93,7 @@ struct PlayerApp {
     search_history: Vec<Option<SearchTarget>>,
     search_history_index: usize,
     show_playing_list: bool,
-    library_playback_list: Option<Arc<PlaybackList>>,
-    library_playback_list_section: Option<LibrarySection>,
+    playback_list_projector: RefCell<PlaybackListProjector>,
     context_menu: Option<ContextMenu>,
 }
 
@@ -565,14 +565,6 @@ fn volume_command(snapshot: &Snapshot, delta: i16) -> Command {
     Command::SetVolume((i16::from(current) + delta).clamp(0, 100) as u8)
 }
 
-fn playback_list(source: PlaybackListSource, tracks: &[Playable]) -> Arc<PlaybackList> {
-    Arc::new(PlaybackList {
-        source,
-        tracks: tracks.to_vec().into(),
-        current_index: 0,
-    })
-}
-
 /// `m:ss` for a millisecond count.
 fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
@@ -887,22 +879,16 @@ impl PlayerApp {
                     .child(name.clone())
                     .into_any_element(),
             );
+            let detail_list = self
+                .playback_list_projector
+                .borrow_mut()
+                .project_detail(target, snap.search_detail.as_ref());
             match &snap.search_detail {
                 Some(SearchDetail::Artist { tracks, albums, .. }) => {
-                    let list = playback_list(
-                        PlaybackListSource::Artist {
-                            locator: match target {
-                                SearchTarget::Artist { locator, .. } => locator.clone(),
-                                _ => String::new(),
-                            },
-                            name: name.clone(),
-                        },
-                        tracks,
-                    );
-                    if !tracks.is_empty() {
+                    if let Some(list) = detail_list.as_ref() {
                         rows.push(search_heading("Most famous tracks").into_any_element());
                         rows.extend(tracks.iter().enumerate().map(|(i, track)| {
-                            library::track_row_in_list(track, None, i, list.clone(), cx)
+                            library::track_row_in_list(track, None, i, Arc::clone(list), cx)
                                 .into_any_element()
                         }));
                     }
@@ -950,25 +936,13 @@ impl PlayerApp {
                 }
                 Some(SearchDetail::Album { tracks, .. })
                 | Some(SearchDetail::Playlist { tracks, .. }) => {
-                    let source = match target {
-                        SearchTarget::Album { locator, .. } => PlaybackListSource::Album {
-                            locator: locator.clone(),
-                            name: name.clone(),
-                        },
-                        SearchTarget::Playlist { locator, .. } => PlaybackListSource::Playlist {
-                            locator: locator.clone(),
-                            name: name.clone(),
-                        },
-                        SearchTarget::Artist { .. } => PlaybackListSource::SearchResults {
-                            query: name.clone(),
-                        },
-                    };
-                    let list = playback_list(source, tracks);
-                    rows.push(search_heading("Tracks").into_any_element());
-                    rows.extend(tracks.iter().enumerate().map(|(i, track)| {
-                        library::track_row_in_list(track, None, i, list.clone(), cx)
-                            .into_any_element()
-                    }));
+                    if let Some(list) = detail_list.as_ref() {
+                        rows.push(search_heading("Tracks").into_any_element());
+                        rows.extend(tracks.iter().enumerate().map(|(i, track)| {
+                            library::track_row_in_list(track, None, i, Arc::clone(list), cx)
+                                .into_any_element()
+                        }));
+                    }
                 }
                 None => rows.push(status_row("Loading…".to_string()).into_any_element()),
             }
@@ -980,25 +954,23 @@ impl PlayerApp {
                 .children(rows)
                 .into_any_element()
         } else {
+            let playback_list = self
+                .playback_list_projector
+                .borrow_mut()
+                .project_search(&snap.search);
             match &snap.search {
-                SearchState::Done { query, results, .. }
+                SearchState::Done { results, .. }
                     if !results.tracks.is_empty()
                         || !results.artists.is_empty()
                         || !results.albums.is_empty()
                         || !results.playlists.is_empty() =>
                 {
                     let mut rows = Vec::new();
-                    let list = playback_list(
-                        PlaybackListSource::SearchResults {
-                            query: query.clone(),
-                        },
-                        &results.tracks,
-                    );
 
-                    if !results.tracks.is_empty() {
+                    if let Some(list) = playback_list.as_ref() {
                         rows.push(search_heading("Tracks").into_any_element());
                         rows.extend(results.tracks.iter().enumerate().map(|(i, playable)| {
-                            library::track_row_in_list(playable, None, i, list.clone(), cx)
+                            library::track_row_in_list(playable, None, i, Arc::clone(list), cx)
                                 .into_any_element()
                         }));
                     }
@@ -1515,15 +1487,6 @@ fn open_player_window(cx: &mut App) {
             let mut rx = runtime.subscribe();
             let mut position_rx = runtime.subscribe();
             let app = cx.new(|cx| {
-                let initial_library_playback_list =
-                    library::playback_list_for_state(&initial_snapshot.library);
-                let initial_library_playback_list_section = match &initial_snapshot.library {
-                    LibraryState::Done { section, .. } => Some(*section),
-                    LibraryState::Idle
-                    | LibraryState::Loading { .. }
-                    | LibraryState::Failed { .. } => None,
-                };
-
                 // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
                     loop {
@@ -1535,11 +1498,6 @@ fn open_player_window(cx: &mut App) {
                                 if app.snapshot == snapshot {
                                     return;
                                 }
-                                library::update_library_playback_list_cache(
-                                    &mut app.library_playback_list,
-                                    &mut app.library_playback_list_section,
-                                    &snapshot.library,
-                                );
                                 app.snapshot = snapshot;
                                 // First ready snapshot: load the section the
                                 // sidebar opens with, so the second column is
@@ -1598,8 +1556,7 @@ fn open_player_window(cx: &mut App) {
                     search_history: vec![None],
                     search_history_index: 0,
                     show_playing_list: false,
-                    library_playback_list: initial_library_playback_list,
-                    library_playback_list_section: initial_library_playback_list_section,
+                    playback_list_projector: RefCell::default(),
                     context_menu: None,
                 }
             });
@@ -1672,5 +1629,19 @@ mod tests {
         assert!((actual.g - expected.g).abs() < f32::EPSILON);
         assert!((actual.b - expected.b).abs() < f32::EPSILON);
         assert!((actual.a - expected_alpha).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn legacy_ui_list_caches_and_constructors_are_deleted() {
+        let player = include_str!("main.rs");
+        let library = include_str!("library.rs");
+        let app = &player
+            [player.find("struct PlayerApp").unwrap()..player.find("enum ContextMenu").unwrap()];
+        let helpers = &player[..player.find("impl Render for PlayerApp").unwrap()];
+
+        assert!(!app.contains("library_playback_list"));
+        assert!(!helpers.contains("fn playback_list("));
+        assert!(!library.contains("playback_list_for_library"));
+        assert!(!library.contains("update_library_playback_list_cache"));
     }
 }
