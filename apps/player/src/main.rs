@@ -22,8 +22,8 @@ use gpui::{
     div, hsla, prelude::*, px, relative, rgb,
 };
 use player_core::{
-    Command, LibraryState, LoginState, Playable, Runtime, SearchAlbum, SearchDetail, SearchState,
-    SearchTarget, Snapshot, fake::FakeRuntime,
+    Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListSource, Runtime,
+    SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
 };
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
@@ -90,12 +90,15 @@ struct PlayerApp {
     paste: TextField,
     search_history: Vec<Option<SearchTarget>>,
     search_history_index: usize,
+    show_playing_list: bool,
     context_menu: Option<ContextMenu>,
 }
 
 enum ContextMenu {
     Track {
         playable: Playable,
+        list: Option<Arc<PlaybackList>>,
+        index: usize,
         position: Point<Pixels>,
     },
     Album {
@@ -114,6 +117,7 @@ impl PlayerApp {
 
     fn open_search_target(&mut self, target: SearchTarget, cx: &mut Context<Self>) {
         self.nav = sidebar::NavSection::Search;
+        self.show_playing_list = false;
         self.search_history.truncate(self.search_history_index + 1);
         self.search_history.push(Some(target.clone()));
         self.search_history_index += 1;
@@ -123,6 +127,7 @@ impl PlayerApp {
 
     fn search_for(&mut self, query: String, cx: &mut Context<Self>) {
         self.nav = sidebar::NavSection::Search;
+        self.show_playing_list = false;
         self.search.clear();
         self.search_history = vec![None];
         self.search_history_index = 0;
@@ -207,8 +212,19 @@ impl PlayerApp {
         self.close_context_menu(cx);
     }
 
-    pub(crate) fn open_track_context_menu(&mut self, playable: Playable, position: Point<Pixels>) {
-        self.context_menu = Some(ContextMenu::Track { playable, position });
+    pub(crate) fn open_track_context_menu(
+        &mut self,
+        playable: Playable,
+        list: Option<Arc<PlaybackList>>,
+        index: usize,
+        position: Point<Pixels>,
+    ) {
+        self.context_menu = Some(ContextMenu::Track {
+            playable,
+            list,
+            index,
+            position,
+        });
     }
 
     fn open_album_context_menu(&mut self, album: SearchAlbum, position: Point<Pixels>) {
@@ -219,6 +235,73 @@ impl PlayerApp {
         if self.context_menu.take().is_some() {
             cx.notify();
         }
+    }
+
+    fn render_playback_list(&self, cx: &Context<Self>) -> impl IntoElement {
+        let Some(list) = self.snapshot.implicit_queue.clone() else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .child(status_row("Nothing is queued implicitly.".to_string()));
+        };
+        let list = Arc::new(list);
+        let source_label = list.source.label();
+        let count = list.tracks.len();
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .border_r_1()
+            .border_color(border())
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Playing list"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .child(format!("{source_label} · {count} tracks")),
+                            ),
+                    )
+                    .child(small_button(
+                        "close-playing-list".into(),
+                        "Back",
+                        true,
+                        cx.listener(|app, _, _, cx| {
+                            app.show_playing_list = false;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .id("playing-list-rows")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(list.tracks.iter().enumerate().map(|(index, track)| {
+                        library::track_row_in_list(track, None, index, list.clone(), cx)
+                            .into_any_element()
+                    })),
+            )
     }
 
     fn context_menu_item(
@@ -264,15 +347,26 @@ impl PlayerApp {
             .on_mouse_down_out(cx.listener(|app, _, _, cx| app.close_context_menu(cx)));
 
         match menu {
-            ContextMenu::Track { playable, .. } => {
-                let play = playable.clone();
+            ContextMenu::Track {
+                playable,
+                list,
+                index,
+                ..
+            } => {
+                let play_command = list.clone().map_or_else(
+                    || Command::Play(playable.clone()),
+                    |list| Command::PlayFromList {
+                        list,
+                        index: *index,
+                    },
+                );
                 let enqueue = playable.clone();
                 card = card
                     .child(Self::context_menu_item(
                         "context-play-track",
                         "Play",
                         cx.listener(move |app, _, _, cx| {
-                            app.send(Command::Play(play.clone()));
+                            app.send(play_command.clone());
                             app.close_context_menu(cx);
                         }),
                     ))
@@ -428,6 +522,7 @@ impl PlayerApp {
             "-" => self.send(volume_command(&self.snapshot, -10)),
             "/" => {
                 self.nav = sidebar::NavSection::Search;
+                self.show_playing_list = false;
                 window.focus(&self.search.focus, cx);
                 cx.notify();
             }
@@ -445,6 +540,14 @@ fn volume_command(snapshot: &Snapshot, delta: i16) -> Command {
         .and_then(|p| p.volume_percent)
         .unwrap_or(80);
     Command::SetVolume((i16::from(current) + delta).clamp(0, 100) as u8)
+}
+
+fn playback_list(source: PlaybackListSource, tracks: &[Playable]) -> Arc<PlaybackList> {
+    Arc::new(PlaybackList {
+        source,
+        tracks: tracks.to_vec().into(),
+        current_index: 0,
+    })
 }
 
 /// `m:ss` for a millisecond count.
@@ -491,21 +594,38 @@ impl Render for PlayerApp {
             // ready; then the Comet column layout — fixed sidebar, second
             // column with the browsed library listing, main area.
             .child(if ready(&snap) {
+                let content = if self.show_playing_list {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .child(self.render_playback_list(cx))
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .when_some(self.nav.library(), |row, section| {
+                            row.child(library::render_library(self, section, cx).into_any_element())
+                        })
+                        .when(self.nav == sidebar::NavSection::Settings, |row| {
+                            row.child(self.render_settings().into_any_element())
+                        })
+                        .when(self.nav == sidebar::NavSection::Search, |row| {
+                            row.child(self.render_search(window, cx).into_any_element())
+                        })
+                        .into_any_element()
+                };
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .overflow_hidden()
                     .child(sidebar::render_sidebar(self, cx).into_any_element())
-                    .when_some(self.nav.library(), |row, section| {
-                        row.child(library::render_library(self, section, cx).into_any_element())
-                    })
-                    .when(self.nav == sidebar::NavSection::Settings, |row| {
-                        row.child(self.render_settings().into_any_element())
-                    })
-                    .when(self.nav == sidebar::NavSection::Search, |row| {
-                        row.child(self.render_search(window, cx).into_any_element())
-                    })
+                    .child(content)
                     .child(self.render_queue(cx))
                     .into_any_element()
             } else {
@@ -746,10 +866,21 @@ impl PlayerApp {
             );
             match &snap.search_detail {
                 Some(SearchDetail::Artist { tracks, albums }) => {
+                    let list = playback_list(
+                        PlaybackListSource::Artist {
+                            locator: match target {
+                                SearchTarget::Artist { locator, .. } => locator.clone(),
+                                _ => String::new(),
+                            },
+                            name: name.clone(),
+                        },
+                        tracks,
+                    );
                     if !tracks.is_empty() {
                         rows.push(search_heading("Most famous tracks").into_any_element());
                         rows.extend(tracks.iter().enumerate().map(|(i, track)| {
-                            library::track_row(track, None, i, cx).into_any_element()
+                            library::track_row_in_list(track, None, i, list.clone(), cx)
+                                .into_any_element()
                         }));
                     }
                     if !albums.is_empty() {
@@ -795,9 +926,24 @@ impl PlayerApp {
                     }
                 }
                 Some(SearchDetail::Album { tracks }) | Some(SearchDetail::Playlist { tracks }) => {
+                    let source = match target {
+                        SearchTarget::Album { locator, .. } => PlaybackListSource::Album {
+                            locator: locator.clone(),
+                            name: name.clone(),
+                        },
+                        SearchTarget::Playlist { locator, .. } => PlaybackListSource::Playlist {
+                            locator: locator.clone(),
+                            name: name.clone(),
+                        },
+                        SearchTarget::Artist { .. } => PlaybackListSource::SearchResults {
+                            query: name.clone(),
+                        },
+                    };
+                    let list = playback_list(source, tracks);
                     rows.push(search_heading("Tracks").into_any_element());
                     rows.extend(tracks.iter().enumerate().map(|(i, track)| {
-                        library::track_row(track, None, i, cx).into_any_element()
+                        library::track_row_in_list(track, None, i, list.clone(), cx)
+                            .into_any_element()
                     }));
                 }
                 None => rows.push(status_row("Loading…".to_string()).into_any_element()),
@@ -811,18 +957,25 @@ impl PlayerApp {
                 .into_any_element()
         } else {
             match &snap.search {
-                SearchState::Done { results, .. }
+                SearchState::Done { query, results }
                     if !results.tracks.is_empty()
                         || !results.artists.is_empty()
                         || !results.albums.is_empty()
                         || !results.playlists.is_empty() =>
                 {
                     let mut rows = Vec::new();
+                    let list = playback_list(
+                        PlaybackListSource::SearchResults {
+                            query: query.clone(),
+                        },
+                        &results.tracks,
+                    );
 
                     if !results.tracks.is_empty() {
                         rows.push(search_heading("Tracks").into_any_element());
                         rows.extend(results.tracks.iter().enumerate().map(|(i, playable)| {
-                            library::track_row(playable, None, i, cx).into_any_element()
+                            library::track_row_in_list(playable, None, i, list.clone(), cx)
+                                .into_any_element()
                         }));
                     }
                     if !results.artists.is_empty() {
@@ -895,6 +1048,7 @@ impl PlayerApp {
                             let target = SearchTarget::Playlist {
                                 locator: playlist.locator.clone(),
                                 name: playlist.name.clone(),
+                                from_search: true,
                             };
                             div()
                                 .id(SharedString::from(format!("playlist-{i}")))
@@ -1085,6 +1239,7 @@ impl PlayerApp {
 
     fn render_now_playing(&self, snap: &Snapshot, cx: &Context<Self>) -> impl IntoElement {
         let now = Instant::now();
+        let has_playing_list = snap.implicit_queue.is_some();
         let (title_line, position_ms, duration_ms, progress) = match &snap.playback {
             Some(p) => {
                 let visible = snap.projected_position_ms(now).unwrap_or(p.position_ms);
@@ -1138,7 +1293,19 @@ impl PlayerApp {
                         } else {
                             String::new()
                         },
-                    )),
+                    ))
+                    .when(has_playing_list, |bar| {
+                        bar.child(small_button(
+                            "view-playing-list".into(),
+                            "View list",
+                            true,
+                            cx.listener(|app, _, _, cx| {
+                                app.show_playing_list = true;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        ))
+                    }),
             )
             .cursor_pointer()
             .on_click(
@@ -1381,6 +1548,7 @@ fn open_player_window(cx: &mut App) {
                     paste: TextField::new(cx, "http://127.0.0.1:8989/login?code=…"),
                     search_history: vec![None],
                     search_history_index: 0,
+                    show_playing_list: false,
                     context_menu: None,
                 }
             });

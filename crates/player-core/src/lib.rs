@@ -11,6 +11,7 @@
 
 pub mod fake;
 
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
 
@@ -77,16 +78,79 @@ pub struct SearchResults {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchTarget {
+    Artist {
+        locator: String,
+        name: String,
+    },
+    Album {
+        locator: String,
+        name: String,
+    },
+    Playlist {
+        locator: String,
+        name: String,
+        /// Whether the target came from search results or the user's library.
+        from_search: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchDetail {
+    Artist {
+        tracks: Vec<Playable>,
+        albums: Vec<SearchAlbum>,
+    },
+    Album {
+        tracks: Vec<Playable>,
+    },
+    Playlist {
+        tracks: Vec<Playable>,
+    },
+}
+
+/// The user-visible source of the currently implicit playback list.
+///
+/// This is intentionally separate from the explicit queue: browsing or
+/// selecting a new list replaces this value, while enqueue operations do not.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PlaybackListSource {
+    LikedSongs,
+    RecentlyPlayed,
+    SearchResults { query: String },
     Artist { locator: String, name: String },
     Album { locator: String, name: String },
     Playlist { locator: String, name: String },
 }
 
+impl PlaybackListSource {
+    /// A concise label suitable for the playing-list header.
+    pub fn label(&self) -> String {
+        match self {
+            Self::LikedSongs => "Liked songs".to_string(),
+            Self::RecentlyPlayed => "Recently played".to_string(),
+            Self::SearchResults { query } if query.is_empty() => "Search results".to_string(),
+            Self::SearchResults { query } => format!("Search results: {query}"),
+            Self::Artist { name, .. } => format!("Artist: {name}"),
+            Self::Album { name, .. } => format!("Album: {name}"),
+            Self::Playlist { name, .. } => format!("Playlist: {name}"),
+        }
+    }
+}
+
+/// The ordered list that playback follows after the explicit queue drains.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SearchDetail {
-    Artist { tracks: Vec<Playable>, albums: Vec<SearchAlbum> },
-    Album { tracks: Vec<Playable> },
-    Playlist { tracks: Vec<Playable> },
+pub struct PlaybackList {
+    pub source: PlaybackListSource,
+    pub tracks: Arc<[Playable]>,
+    /// Index of the track currently selected in `tracks`.
+    pub current_index: usize,
+}
+
+impl PlaybackList {
+    /// Return the currently selected track, if the list is valid and non-empty.
+    pub fn current(&self) -> Option<&Playable> {
+        self.tracks.get(self.current_index)
+    }
 }
 
 /// A library section the navigation sidebar can browse.
@@ -207,8 +271,8 @@ pub struct Notice {
     pub dismissible: bool,
 }
 
-/// One immutable runtime state: the six fields every version-one user story
-/// needs. Catalog Availability shows up as `SearchState::Failed` plus
+/// One immutable runtime state containing the fields every version-one user
+/// story needs. Catalog Availability shows up as `SearchState::Failed` plus
 /// `notice`; Playback Health as `audio`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
@@ -218,6 +282,8 @@ pub struct Snapshot {
     pub playback: Option<PlaybackStatus>,
     /// Upcoming Playables in order.
     pub queue: Vec<Playable>,
+    /// The list that supplies playback after `queue` is empty.
+    pub implicit_queue: Option<PlaybackList>,
     /// Listing for the section the sidebar last asked to browse.
     pub library: LibraryState,
     pub audio: AudioState,
@@ -235,6 +301,7 @@ impl Default for Snapshot {
             search_detail: None,
             playback: None,
             queue: Vec::new(),
+            implicit_queue: None,
             library: LibraryState::Idle,
             audio: AudioState::Starting,
             notice: None,
@@ -285,6 +352,11 @@ pub enum Command {
     /// `Snapshot::library`.
     Browse(LibrarySection),
     Play(Playable),
+    /// Start `list` at `index`; this replaces the previous implicit list.
+    PlayFromList {
+        list: Arc<PlaybackList>,
+        index: usize,
+    },
     Pause,
     Resume,
     /// Seek to an absolute position in milliseconds.

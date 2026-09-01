@@ -1,15 +1,19 @@
 //! The second column: the browsed library listing for the active sidebar
 //! section. Track rows reuse the search-result recipe (title/artists |
-//! album | duration, click plays, chip enqueues); playlist rows show name
-//! and size — drilling into one is deferred until a source exposes it.
+//! album | duration, click plays, chip enqueues); playlist rows open their
+//! track list.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, ParentElement,
     SharedString, Styled, div, prelude::*, px, uniform_list,
 };
-use player_core::{LibraryEntry, LibrarySection, LibraryState};
+use player_core::{
+    Command, LibraryEntry, LibrarySection, LibraryState, PlaybackList, PlaybackListSource,
+    SearchTarget,
+};
 
 use crate::{ACCENT, MUTED, PANEL, PlayerApp, border, rgb, tone};
 
@@ -35,6 +39,7 @@ pub(crate) fn render_library(
         }
         LibraryState::Done { entries, .. } => {
             let count = Some(entries.len());
+            let playback_list = library_playback_list(section, entries);
             (
                 count,
                 // Each library section contains one row shape, so the
@@ -42,15 +47,15 @@ pub(crate) fn render_library(
                 uniform_list(
                     "library-rows",
                     entries.len(),
-                    cx.processor(|app, range: Range<usize>, _, cx| {
+                    cx.processor(move |app, range: Range<usize>, _, cx| {
                         let LibraryState::Done { entries, .. } = &app.snapshot.library else {
                             return Vec::new();
                         };
                         range
                             .filter_map(|index| {
-                                entries
-                                    .get(index)
-                                    .map(|entry| render_library_entry(entry, index, cx))
+                                entries.get(index).map(|entry| {
+                                    render_library_entry(entry, index, playback_list.as_ref(), cx)
+                                })
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -102,16 +107,56 @@ pub(crate) fn render_library(
         )
 }
 
-fn render_library_entry(entry: &LibraryEntry, index: usize, cx: &Context<PlayerApp>) -> AnyElement {
+fn render_library_entry(
+    entry: &LibraryEntry,
+    index: usize,
+    playback_list: Option<&Arc<PlaybackList>>,
+    cx: &Context<PlayerApp>,
+) -> AnyElement {
     match entry {
         LibraryEntry::Track {
             playable,
             played_at_ms,
-        } => track_row(playable, *played_at_ms, index, cx).into_any_element(),
+        } => playback_list.map_or_else(
+            || track_row(playable, *played_at_ms, index, cx).into_any_element(),
+            |list| {
+                track_row_in_list(playable, *played_at_ms, index, Arc::clone(list), cx)
+                    .into_any_element()
+            },
+        ),
         LibraryEntry::Playlist {
-            name, track_count, ..
-        } => playlist_row(name, *track_count, index).into_any_element(),
+            id,
+            name,
+            track_count,
+            ..
+        } => playlist_row(id, name, *track_count, index, cx).into_any_element(),
     }
+}
+
+fn library_playback_list(
+    section: LibrarySection,
+    entries: &[LibraryEntry],
+) -> Option<Arc<PlaybackList>> {
+    let tracks = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            LibraryEntry::Track { playable, .. } => Some(playable.clone()),
+            LibraryEntry::Playlist { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    if tracks.is_empty() {
+        return None;
+    }
+    let source = match section {
+        LibrarySection::LikedSongs => PlaybackListSource::LikedSongs,
+        LibrarySection::RecentlyPlayed => PlaybackListSource::RecentlyPlayed,
+        LibrarySection::Playlists => return None,
+    };
+    Some(Arc::new(PlaybackList {
+        source,
+        tracks: tracks.into(),
+        current_index: 0,
+    }))
 }
 
 /// One playable track row: click plays, the chip enqueues.
@@ -121,9 +166,34 @@ pub(crate) fn track_row(
     index: usize,
     cx: &Context<PlayerApp>,
 ) -> impl IntoElement {
+    track_row_with_list(playable, played_at_ms, index, None, cx)
+}
+
+/// One track row that replaces the implicit playback list when selected.
+pub(crate) fn track_row_in_list(
+    playable: &player_core::Playable,
+    played_at_ms: Option<u64>,
+    index: usize,
+    list: Arc<PlaybackList>,
+    cx: &Context<PlayerApp>,
+) -> impl IntoElement {
+    track_row_with_list(playable, played_at_ms, index, Some(list), cx)
+}
+
+fn track_row_with_list(
+    playable: &player_core::Playable,
+    played_at_ms: Option<u64>,
+    index: usize,
+    list: Option<Arc<PlaybackList>>,
+    cx: &Context<PlayerApp>,
+) -> impl IntoElement {
     let play = playable.clone();
     let enqueue = playable.clone();
     let context_playable = playable.clone();
+    let play_command = list.clone().map_or_else(
+        || Command::Play(play.clone()),
+        |list| Command::PlayFromList { list, index },
+    );
     div()
         .id(SharedString::from(format!("library-track-{index}")))
         .w_full()
@@ -137,13 +207,16 @@ pub(crate) fn track_row(
         .gap(px(10.0))
         .cursor_pointer()
         .hover(|style| style.bg(tone(PANEL, 0.60)))
-        .on_click(
-            cx.listener(move |app, _, _, _| app.send(player_core::Command::Play(play.clone()))),
-        )
+        .on_click(cx.listener(move |app, _, _, _| app.send(play_command.clone())))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
-                app.open_track_context_menu(context_playable.clone(), event.position);
+                app.open_track_context_menu(
+                    context_playable.clone(),
+                    list.clone(),
+                    index,
+                    event.position,
+                );
                 window.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
@@ -218,9 +291,19 @@ fn enqueue_chip(
         .child("+ Queue")
 }
 
-/// One playlist row. Drilling in is deferred until a source exposes it, so
-/// the row is display-only.
-fn playlist_row(name: &str, track_count: u32, index: usize) -> impl IntoElement {
+/// One playlist row. Clicking opens its track list.
+fn playlist_row(
+    id: &str,
+    name: &str,
+    track_count: u32,
+    index: usize,
+    cx: &Context<PlayerApp>,
+) -> impl IntoElement {
+    let target = SearchTarget::Playlist {
+        locator: id.to_string(),
+        name: name.to_string(),
+        from_search: false,
+    };
     div()
         .id(SharedString::from(format!("library-playlist-{index}")))
         .w_full()
@@ -231,6 +314,11 @@ fn playlist_row(name: &str, track_count: u32, index: usize) -> impl IntoElement 
         .flex()
         .items_center()
         .justify_between()
+        .cursor_pointer()
+        .hover(|style| style.bg(tone(PANEL, 0.60)))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.open_search_target(target.clone(), cx);
+        }))
         .child(
             div()
                 .text_size(px(13.0))

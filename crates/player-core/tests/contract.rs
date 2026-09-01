@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use player_core::{
     AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Playable,
-    PlaybackStatus, Runtime, SearchState, Snapshot, Source, project_position,
+    PlaybackList, PlaybackListSource, PlaybackStatus, Runtime, SearchState, Snapshot, Source,
+    project_position,
 };
 
 /// The contract crate itself stays runtime-free; tests drive async watch
@@ -149,6 +151,58 @@ fn fake_runtime_answers_commands_with_snapshots() {
 }
 
 #[test]
+fn fake_runtime_prioritizes_explicit_queue_then_resumes_implicit_list() {
+    block_on(async {
+        let runtime = player_core::fake::FakeRuntime::new();
+        let mut rx = runtime.subscribe();
+        let first = playable();
+        let mut second = playable();
+        second.locator = "spotify:track:second".to_string();
+        second.title = "Second".to_string();
+        let mut queued = playable();
+        queued.locator = "spotify:track:queued".to_string();
+        queued.title = "Queued".to_string();
+
+        let list = PlaybackList {
+            source: PlaybackListSource::LikedSongs,
+            tracks: vec![first.clone(), second.clone()].into(),
+            current_index: 0,
+        };
+        assert!(runtime.command(Command::PlayFromList {
+            list: Arc::new(list),
+            index: 0,
+        }));
+        rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&first))
+            .await
+            .unwrap();
+
+        assert!(runtime.command(Command::Enqueue(queued.clone())));
+        rx.wait_for(|snap| snap.queue == [queued.clone()])
+            .await
+            .unwrap();
+
+        assert!(runtime.command(Command::Next));
+        rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&queued))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.borrow().implicit_queue.as_ref().unwrap().current_index,
+            0
+        );
+
+        assert!(runtime.command(Command::Next));
+        rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&second))
+            .await
+            .unwrap();
+        let snapshot = rx.borrow().clone();
+        assert!(snapshot.queue.is_empty());
+        assert_eq!(snapshot.implicit_queue.unwrap().current_index, 1);
+
+        runtime.shutdown();
+    });
+}
+
+#[test]
 fn search_without_hits_still_reports_done_with_empty_results() {
     block_on(async {
         let runtime = player_core::fake::FakeRuntime::new();
@@ -210,14 +264,17 @@ fn fake_runtime_browses_every_library_section() {
                     // Track sections carry Playables; the playlists section
                     // carries playlist rows.
                     if section == LibrarySection::Playlists {
-                        assert!(entries.iter().all(|e| matches!(
-                            e,
-                            LibraryEntry::Playlist { .. }
-                        )));
+                        assert!(
+                            entries
+                                .iter()
+                                .all(|e| matches!(e, LibraryEntry::Playlist { .. }))
+                        );
                     } else {
-                        assert!(entries
-                            .iter()
-                            .all(|e| matches!(e, LibraryEntry::Track { .. })));
+                        assert!(
+                            entries
+                                .iter()
+                                .all(|e| matches!(e, LibraryEntry::Track { .. }))
+                        );
                     }
                 }
                 other => panic!("expected Done for {section:?}, got {other:?}"),

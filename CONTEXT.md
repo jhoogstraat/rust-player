@@ -53,6 +53,10 @@ _Avoid_: Heartbeat, poll interval, frame loop
 An ordered sequence of source-scoped Playables scheduled within a Playback Session. A Queue may contain Playables from different Music Sources.
 _Avoid_: Playlist, play order
 
+**Implicit Playback List**:
+The ordered list selected by playing an item from a browsable list such as liked songs, search results, an artist, an album, or a playlist. It supplies the next Playable after the explicit Queue drains. Selecting an item from another list replaces the current Implicit Playback List; adding items to the explicit Queue does not.
+_Avoid_: hidden queue, playlist queue
+
 **Catalog Availability**:
 Whether a Music Source can currently answer browsing, search, and metadata requests.
 _Avoid_: Connection status, source health

@@ -239,13 +239,16 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
             snap.login = LoginState::Ready;
         }
         Command::Play(playable) => {
-            snap.playback = Some(PlaybackStatus {
-                playable,
-                is_playing: true,
-                position_ms: 0,
-                observed_at: Instant::now(),
-                volume_percent: Some(80),
-            });
+            snap.implicit_queue = None;
+            start_playback(&mut snap, playable);
+        }
+        Command::PlayFromList { list, index } => {
+            let mut list = (*list).clone();
+            if let Some(playable) = list.tracks.get(index).cloned() {
+                list.current_index = index;
+                snap.implicit_queue = Some(list);
+                start_playback(&mut snap, playable);
+            }
         }
         Command::Pause => {
             if let Some(p) = snap.playback.as_mut() {
@@ -269,17 +272,20 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
         Command::Next => {
             if !snap.queue.is_empty() {
                 let next = snap.queue.remove(0);
-                snap.playback = Some(PlaybackStatus {
-                    playable: next,
-                    is_playing: true,
-                    position_ms: 0,
-                    observed_at: Instant::now(),
-                    volume_percent: snap.playback.as_ref().and_then(|p| p.volume_percent),
-                });
+                start_playback(&mut snap, next);
+            } else if let Some(next) = advance_implicit_queue(&mut snap) {
+                start_playback(&mut snap, next);
             }
         }
         Command::Previous => {
-            if let Some(p) = snap.playback.as_mut() {
+            let previous = snap.implicit_queue.as_mut().and_then(|list| {
+                let previous_index = list.current_index.checked_sub(1)?;
+                list.current_index = previous_index;
+                list.tracks.get(previous_index).cloned()
+            });
+            if let Some(previous) = previous {
+                start_playback(&mut snap, previous);
+            } else if let Some(p) = snap.playback.as_mut() {
                 p.position_ms = 0;
                 p.observed_at = Instant::now();
             }
@@ -308,6 +314,29 @@ fn apply(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>, command: Command
     }
     drop(snap);
     publish(state, tx);
+}
+
+fn start_playback(snapshot: &mut Snapshot, playable: Playable) {
+    let volume_percent = snapshot
+        .playback
+        .as_ref()
+        .and_then(|playback| playback.volume_percent)
+        .or(Some(80));
+    snapshot.playback = Some(PlaybackStatus {
+        playable,
+        is_playing: true,
+        position_ms: 0,
+        observed_at: Instant::now(),
+        volume_percent,
+    });
+}
+
+fn advance_implicit_queue(snapshot: &mut Snapshot) -> Option<Playable> {
+    let list = snapshot.implicit_queue.as_mut()?;
+    let next_index = list.current_index.checked_add(1)?;
+    let next = list.tracks.get(next_index).cloned()?;
+    list.current_index = next_index;
+    Some(next)
 }
 
 fn publish(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>) {

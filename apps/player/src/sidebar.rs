@@ -119,6 +119,7 @@ fn nav_row(
         .hover(|style| style.bg(wash(0.07)).text_color(rgb(TEXT)))
         .on_click(cx.listener(move |app, _, _, cx| {
             app.nav = section;
+            app.show_playing_list = false;
             if let Some(library) = section.library() {
                 app.send(Command::Browse(library));
             }
