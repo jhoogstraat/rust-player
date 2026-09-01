@@ -11,6 +11,7 @@ mod logging;
 mod sidebar;
 mod text_input;
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -19,11 +20,11 @@ use gpui::{
     Anchor, AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, anchored, deferred,
-    div, hsla, prelude::*, px, relative, rgb,
+    div, hsla, prelude::*, px, relative, rgb, uniform_list,
 };
 use player_core::{
-    Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListSource, Runtime,
-    SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
+    Command, LibrarySection, LibraryState, LoginState, Playable, PlaybackList, PlaybackListSource,
+    Runtime, SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
 };
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
@@ -91,6 +92,8 @@ struct PlayerApp {
     search_history: Vec<Option<SearchTarget>>,
     search_history_index: usize,
     show_playing_list: bool,
+    library_playback_list: Option<Arc<PlaybackList>>,
+    library_playback_list_section: Option<LibrarySection>,
     context_menu: Option<ContextMenu>,
 }
 
@@ -247,6 +250,7 @@ impl PlayerApp {
         let list = Arc::new(list);
         let source_label = list.source.label();
         let count = list.tracks.len();
+        let rows_list = list.clone();
         div()
             .flex_1()
             .min_w_0()
@@ -293,14 +297,33 @@ impl PlayerApp {
             )
             .child(
                 div()
-                    .id("playing-list-rows")
+                    .id("playing-list-viewport")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .children(list.tracks.iter().enumerate().map(|(index, track)| {
-                        library::track_row_in_list(track, None, index, list.clone(), cx)
-                            .into_any_element()
-                    })),
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "playing-list-rows",
+                            count,
+                            cx.processor(move |_app, range: Range<usize>, _, cx| {
+                                range
+                                    .filter_map(|index| {
+                                        rows_list.tracks.get(index).map(|track| {
+                                            library::track_row_in_list(
+                                                track,
+                                                None,
+                                                index,
+                                                rows_list.clone(),
+                                                cx,
+                                            )
+                                            .into_any_element()
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .size_full(),
+                    ),
             )
     }
 
@@ -558,7 +581,7 @@ fn clock(ms: u64) -> String {
 
 impl Render for PlayerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let snap = self.snapshot.clone();
+        let snap = &self.snapshot;
 
         div()
             .id("root")
@@ -1286,16 +1309,27 @@ impl PlayerApp {
                     .items_center()
                     .justify_between()
                     .px(px(18.))
-                    .child(div().text_size(px(12.)).overflow_hidden().child(title_line))
-                    .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
-                        if duration_ms > 0 {
-                            format!("{} / {}", clock(position_ms), clock(duration_ms))
-                        } else {
-                            String::new()
-                        },
-                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .overflow_hidden()
+                            .child(title_line),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(if duration_ms > 0 {
+                                format!("{} / {}", clock(position_ms), clock(duration_ms))
+                            } else {
+                                String::new()
+                            }),
+                    )
                     .when(has_playing_list, |bar| {
-                        bar.child(small_button(
+                        bar.child(div().flex_none().child(small_button(
                             "view-playing-list".into(),
                             "View list",
                             true,
@@ -1304,7 +1338,7 @@ impl PlayerApp {
                                 cx.stop_propagation();
                                 cx.notify();
                             }),
-                        ))
+                        )))
                     }),
             )
             .cursor_pointer()
@@ -1480,6 +1514,15 @@ fn open_player_window(cx: &mut App) {
             let mut rx = runtime.subscribe();
             let mut position_rx = runtime.subscribe();
             let app = cx.new(|cx| {
+                let initial_library_playback_list =
+                    library::playback_list_for_state(&initial_snapshot.library);
+                let initial_library_playback_list_section = match &initial_snapshot.library {
+                    LibraryState::Done { section, .. } => Some(*section),
+                    LibraryState::Idle
+                    | LibraryState::Loading { .. }
+                    | LibraryState::Failed { .. } => None,
+                };
+
                 // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
                     loop {
@@ -1491,6 +1534,11 @@ fn open_player_window(cx: &mut App) {
                                 if app.snapshot == snapshot {
                                     return;
                                 }
+                                library::update_library_playback_list_cache(
+                                    &mut app.library_playback_list,
+                                    &mut app.library_playback_list_section,
+                                    &snapshot.library,
+                                );
                                 app.snapshot = snapshot;
                                 // First ready snapshot: load the section the
                                 // sidebar opens with, so the second column is
@@ -1549,6 +1597,8 @@ fn open_player_window(cx: &mut App) {
                     search_history: vec![None],
                     search_history_index: 0,
                     show_playing_list: false,
+                    library_playback_list: initial_library_playback_list,
+                    library_playback_list_section: initial_library_playback_list_section,
                     context_menu: None,
                 }
             });
