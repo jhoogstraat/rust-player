@@ -95,143 +95,17 @@ pub struct SpotatuiPlayer {
     tx: watch::Sender<Snapshot>,
     /// Present once boot succeeded; taken by `shutdown`.
     frontend: Mutex<Option<frontend::Runtime>>,
-    /// Catalog intent, projection, revisions, and direct publication policy.
-    catalog: Arc<Mutex<CatalogProjection>>,
+    /// Search text is not carried by the fork snapshot, so retain only this
+    /// source intent while translating engine facts.
+    last_query: Arc<Mutex<Option<String>>>,
+    /// The library section selected by the caller; rows remain engine-owned.
+    requested_library: Arc<Mutex<Option<LibrarySection>>>,
     /// The source list that should resume after the explicit queue drains.
     implicit_queue: Arc<Mutex<Option<PlaybackList>>>,
     /// Delivers the manual redirect-URL paste to the blocked boot prompt.
     paste_url_tx: mpsc::Sender<String>,
     /// Wakes the boot thread for another attempt after a failed boot.
     retry_boot_tx: mpsc::Sender<()>,
-}
-
-/// Keeps catalog policy together while the Playback Engine owns the Playback Session.
-#[derive(Default)]
-struct CatalogProjection {
-    last_query: Option<String>,
-    requested_library: Option<LibrarySection>,
-    revisions: RevisionTracker,
-}
-
-impl CatalogProjection {
-    fn search(&mut self, query: String) {
-        self.last_query = Some(query);
-    }
-
-    fn relay(&mut self, engine_snapshot: &frontend::Snapshot) -> Snapshot {
-        let mut snapshot = map_snapshot(engine_snapshot, self.last_query.as_deref());
-        snapshot.library = self
-            .requested_library
-            .map(|section| map_library(engine_snapshot, section))
-            .unwrap_or_default();
-        self.revise(&mut snapshot);
-        snapshot
-    }
-
-    fn begin_library(&mut self, current: Snapshot, section: LibrarySection) -> Snapshot {
-        self.requested_library = Some(section);
-        self.with_library(current, LibraryState::Loading { section })
-    }
-
-    fn project_cached_library(
-        &mut self,
-        current: Snapshot,
-        engine_snapshot: &frontend::Snapshot,
-        section: LibrarySection,
-    ) -> Snapshot {
-        self.with_library(current, map_library(engine_snapshot, section))
-    }
-
-    fn with_library(&mut self, current: Snapshot, library: LibraryState) -> Snapshot {
-        let mut next = Snapshot { library, ..current };
-        self.revise(&mut next);
-        next
-    }
-
-    fn revise(&mut self, snapshot: &mut Snapshot) {
-        self.revisions.revise(snapshot);
-    }
-}
-
-#[derive(Default)]
-struct RevisionTracker {
-    next: u64,
-    search: Option<(String, SearchResults, CatalogRevision)>,
-    detail: Option<(SearchDetail, CatalogRevision)>,
-    library: Option<(LibrarySection, Vec<LibraryEntry>, CatalogRevision)>,
-}
-
-impl RevisionTracker {
-    fn next(&mut self) -> CatalogRevision {
-        self.next += 1;
-        CatalogRevision::new(self.next)
-    }
-
-    fn revise(&mut self, snapshot: &mut Snapshot) {
-        match &mut snapshot.search {
-            SearchState::Done {
-                query,
-                revision,
-                results,
-            } => {
-                let value = self
-                    .search
-                    .as_ref()
-                    .and_then(|(old_query, old_results, revision)| {
-                        (old_query == query && old_results == results).then_some(*revision)
-                    })
-                    .unwrap_or_else(|| self.next());
-                *revision = value;
-                self.search = Some((query.clone(), results.clone(), value));
-            }
-            _ => self.search = None,
-        }
-        match &mut snapshot.search_detail {
-            Some(detail) => {
-                let raw = detail.clone();
-                let value = self
-                    .detail
-                    .as_ref()
-                    .and_then(|(old, revision)| (old == &raw).then_some(*revision))
-                    .unwrap_or_else(|| self.next());
-                set_detail_revision(detail, value);
-                self.detail = Some((raw, value));
-            }
-            None => self.detail = None,
-        }
-        match &mut snapshot.library {
-            LibraryState::Done {
-                section,
-                revision,
-                entries,
-            } => {
-                let value = self
-                    .library
-                    .as_ref()
-                    .and_then(|(old_section, old_entries, revision)| {
-                        (old_section == section && old_entries == entries).then_some(*revision)
-                    })
-                    .unwrap_or_else(|| self.next());
-                *revision = value;
-                self.library = Some((*section, entries.clone(), value));
-            }
-            _ => self.library = None,
-        }
-    }
-}
-
-fn set_detail_revision(detail: &mut SearchDetail, revision: CatalogRevision) {
-    match detail {
-        SearchDetail::Artist {
-            revision: current, ..
-        }
-        | SearchDetail::Album {
-            revision: current, ..
-        }
-        | SearchDetail::Playlist {
-            revision: current, ..
-        } => *current = revision,
-    }
 }
 
 /// Connect to the real runtime. Returns immediately; sign-in progress flows
@@ -245,7 +119,8 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
     let player = Arc::new(SpotatuiPlayer {
         tx: tx.clone(),
         frontend: Mutex::new(None),
-        catalog: Arc::default(),
+        last_query: Arc::default(),
+        requested_library: Arc::default(),
         implicit_queue: Arc::default(),
         paste_url_tx,
         retry_boot_tx,
@@ -317,12 +192,18 @@ impl SpotatuiPlayer {
     fn stage(&self, runtime: frontend::Runtime) {
         let mut rx = runtime.subscribe();
         let relay_tx = self.tx.clone();
-        let catalog = Arc::clone(&self.catalog);
+        let last_query = Arc::clone(&self.last_query);
+        let requested_library = Arc::clone(&self.requested_library);
         let implicit_queue = Arc::clone(&self.implicit_queue);
         runtime.handle().spawn(async move {
             loop {
                 let engine_snapshot = rx.borrow_and_update().clone();
-                let mut snapshot = catalog.lock().unwrap().relay(&engine_snapshot);
+                let query = last_query.lock().unwrap().clone();
+                let section = *requested_library.lock().unwrap();
+                let mut snapshot = map_snapshot(&engine_snapshot, query.as_deref());
+                snapshot.library = section
+                    .map(|section| map_library(&engine_snapshot, section))
+                    .unwrap_or_default();
                 snapshot.implicit_queue = map_implicit_queue(
                     implicit_queue.lock().unwrap().clone(),
                     snapshot.playback.as_ref(),
@@ -363,7 +244,7 @@ impl Runtime for SpotatuiPlayer {
                 prompt_open && self.paste_url_tx.send(url).is_ok()
             }
             Command::Search(query) => {
-                self.catalog.lock().unwrap().search(query.clone());
+                *self.last_query.lock().unwrap() = Some(query.clone());
                 self.with_frontend(|runtime| runtime.apply(EngineAction::SearchActiveSource(query)))
                     .is_some()
             }
@@ -401,10 +282,13 @@ impl Runtime for SpotatuiPlayer {
                     return false;
                 };
                 let current = self.tx.borrow().clone();
-                publish(
-                    &self.tx,
-                    self.catalog.lock().unwrap().begin_library(current, section),
-                );
+                publish(&self.tx, {
+                    *self.requested_library.lock().unwrap() = Some(section);
+                    Snapshot {
+                        library: LibraryState::Loading { section },
+                        ..current
+                    }
+                });
 
                 self.with_frontend(|runtime| match section {
                     LibrarySection::LikedSongs => {
@@ -429,11 +313,10 @@ impl Runtime for SpotatuiPlayer {
                         let current = self.tx.borrow().clone();
                         publish(
                             &self.tx,
-                            self.catalog.lock().unwrap().project_cached_library(
-                                current,
-                                &engine_snapshot,
-                                section,
-                            ),
+                            Snapshot {
+                                library: map_library(&engine_snapshot, section),
+                                ..current
+                            },
                         );
                     }
                 }
@@ -652,7 +535,7 @@ mod tests {
     /// Fork state while idle-with-results and playing.
     fn idle_with_results() -> frontend::Snapshot {
         frontend::Snapshot {
-            search_tracks: vec![track("a"), track("b")],
+            search_tracks: vec![track("a"), track("b")].into(),
             spotify_connected: true,
             audio_ready: true,
             ..Default::default()
@@ -702,119 +585,60 @@ mod tests {
     }
 
     #[test]
-    fn accepted_search_detail_and_library_listings_receive_revisions() {
-        let mut catalog = CatalogProjection::default();
-        let mut snapshot = map_snapshot(&idle_with_results(), Some("coltrane"));
-        catalog.revise(&mut snapshot);
-        let first_search_revision = match &snapshot.search {
-            SearchState::Done { revision, .. } => *revision,
-            _ => unreachable!(),
+    fn source_catalog_revisions_cross_the_adapter_unchanged() {
+        let mut fork = idle_with_results();
+        fork.search_revision = 7;
+        let Snapshot {
+            search: SearchState::Done { revision, .. },
+            ..
+        } = map_snapshot(&fork, Some("coltrane"))
+        else {
+            panic!("expected completed search");
         };
+        assert_eq!(revision, CatalogRevision::new(7));
 
-        snapshot = map_snapshot(
-            &frontend::Snapshot {
-                search_loading: true,
-                ..Default::default()
-            },
-            Some("coltrane"),
+        fork.detail_revision = 11;
+        fork.search_detail = Some(frontend::SearchDetail::Album {
+            tracks: vec![track("detail")].into(),
+        });
+        let detail = map_snapshot(&fork, None).search_detail.unwrap();
+        assert!(
+            matches!(detail, SearchDetail::Album { revision, .. } if revision == CatalogRevision::new(11))
         );
-        catalog.revise(&mut snapshot);
-        assert!(matches!(snapshot.search, SearchState::Loading { .. }));
 
-        snapshot = map_snapshot(&idle_with_results(), Some("coltrane"));
-        catalog.revise(&mut snapshot);
-        let refreshed_search_revision = match &snapshot.search {
-            SearchState::Done { revision, .. } => *revision,
-            _ => unreachable!(),
-        };
-        assert!(first_search_revision < refreshed_search_revision);
-
-        let detail_fork = frontend::Snapshot {
-            search_detail: Some(frontend::SearchDetail::Album {
-                tracks: vec![track("detail")],
-            }),
-            ..Default::default()
-        };
-        snapshot = map_snapshot(&detail_fork, None);
-        catalog.revise(&mut snapshot);
-        let first_detail_revision = match &snapshot.search_detail {
-            Some(SearchDetail::Album { revision, .. }) => *revision,
-            _ => unreachable!(),
-        };
-
-        snapshot = map_snapshot(&frontend::Snapshot::default(), None);
-        catalog.revise(&mut snapshot);
-        assert!(snapshot.search_detail.is_none());
-
-        snapshot = map_snapshot(&detail_fork, None);
-        catalog.revise(&mut snapshot);
-        let refreshed_detail_revision = match &snapshot.search_detail {
-            Some(SearchDetail::Album { revision, .. }) => *revision,
-            _ => unreachable!(),
-        };
-        assert!(first_detail_revision < refreshed_detail_revision);
-    }
-
-    #[test]
-    fn relayed_library_listings_keep_revisions_until_an_incomplete_state() {
-        let mut catalog = CatalogProjection::default();
-        let section = LibrarySection::LikedSongs;
-        assert!(matches!(
-            catalog.begin_library(Snapshot::default(), section).library,
-            LibraryState::Loading {
-                section: LibrarySection::LikedSongs
-            }
-        ));
-        let engine_snapshot = frontend::Snapshot {
-            library: frontend::LibrarySnapshot {
-                liked_songs: Some(vec![track("catalog")]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let first = catalog.relay(&engine_snapshot);
-        let first_revision = match first.library {
-            LibraryState::Done { revision, .. } => revision,
-            _ => unreachable!(),
-        };
-        assert!(matches!(
-            catalog.relay(&engine_snapshot).library,
-            LibraryState::Done { revision, .. } if revision == first_revision
-        ));
-
-        assert!(matches!(
-            catalog.relay(&frontend::Snapshot::default()).library,
-            LibraryState::Loading {
-                section: LibrarySection::LikedSongs
-            }
-        ));
-        assert!(matches!(
-            catalog.relay(&engine_snapshot).library,
-            LibraryState::Done { revision, .. } if revision > first_revision
-        ));
+        fork.library_revision = 13;
+        fork.library.liked_songs = Some(vec![track("liked")].into());
+        let library = map_library(&fork, LibrarySection::LikedSongs);
+        assert!(
+            matches!(library, LibraryState::Done { revision, .. } if revision == CatalogRevision::new(13))
+        );
     }
 
     #[test]
     fn relayed_catalog_failure_keeps_playback_healthy() {
-        let mut catalog = CatalogProjection::default();
-        catalog.begin_library(Snapshot::default(), LibrarySection::LikedSongs);
-        let snapshot = catalog.relay(&frontend::Snapshot {
-            notice: Some("offline".to_string()),
-            notice_is_error: true,
-            spotify_connected: true,
-            audio_ready: true,
-            playback: Some(frontend::PlaybackState {
-                track: Some(track("playing")),
-                is_playing: true,
-                progress_ms: 5,
-                shuffle: false,
-                repeat: "off".to_string(),
-                volume_percent: None,
-                device: None,
-            }),
-            ..Default::default()
-        });
+        let mut snapshot = map_snapshot(
+            &frontend::Snapshot {
+                notice: Some("offline".to_string()),
+                notice_is_error: true,
+                spotify_connected: true,
+                audio_ready: true,
+                playback: Some(frontend::PlaybackState {
+                    track: Some(track("playing")),
+                    is_playing: true,
+                    progress_ms: 5,
+                    shuffle: false,
+                    repeat: "off".to_string(),
+                    volume_percent: None,
+                    device: None,
+                }),
+                ..Default::default()
+            },
+            None,
+        );
+        snapshot.library = LibraryState::Failed {
+            section: LibrarySection::LikedSongs,
+            message: "offline".to_string(),
+        };
 
         assert!(matches!(snapshot.library, LibraryState::Failed { .. }));
         assert_eq!(snapshot.login, LoginState::Ready);
@@ -831,7 +655,8 @@ mod tests {
         fork.search_artists = vec![frontend::ArtistInfo {
             name: "Artist".to_string(),
             ..Default::default()
-        }];
+        }]
+        .into();
         fork.search_albums = vec![frontend::AlbumInfo {
             name: "Album".to_string(),
             artists: vec![frontend::ArtistRef {
@@ -839,7 +664,8 @@ mod tests {
                 ..Default::default()
             }],
             ..Default::default()
-        }];
+        }]
+        .into();
         fork.search_playlists = vec![frontend::PlaylistInfo {
             uri: "spotify:playlist:mix".to_string(),
             name: "Mix".to_string(),
@@ -850,7 +676,8 @@ mod tests {
             collaborative: false,
             public: None,
             image_url: None,
-        }];
+        }]
+        .into();
 
         let Snapshot {
             search: SearchState::Done { results, .. },
@@ -869,19 +696,22 @@ mod tests {
     fn maps_fork_library_rows_and_keeps_unfetched_sections_loading() {
         let fork = frontend::Snapshot {
             library: frontend::LibrarySnapshot {
-                liked_songs: Some(vec![track("liked")]),
-                recently_played: Some(vec![track("recent")]),
-                playlists: Some(vec![frontend::PlaylistInfo {
-                    uri: "spotify:playlist:mix".to_string(),
-                    name: "Mix".to_string(),
-                    owner: "me".to_string(),
-                    track_count: 3,
-                    id: Some("mix".to_string()),
-                    owner_id: None,
-                    collaborative: false,
-                    public: Some(false),
-                    image_url: None,
-                }]),
+                liked_songs: Some(vec![track("liked")].into()),
+                recently_played: Some(vec![track("recent")].into()),
+                playlists: Some(
+                    vec![frontend::PlaylistInfo {
+                        uri: "spotify:playlist:mix".to_string(),
+                        name: "Mix".to_string(),
+                        owner: "me".to_string(),
+                        track_count: 3,
+                        id: Some("mix".to_string()),
+                        owner_id: None,
+                        collaborative: false,
+                        public: Some(false),
+                        image_url: None,
+                    }]
+                    .into(),
+                ),
             },
             ..Default::default()
         };
@@ -930,61 +760,6 @@ mod tests {
             LibraryState::Failed { section: LibrarySection::RecentlyPlayed, message }
                 if message == "offline"
         ));
-    }
-
-    #[test]
-    fn library_refresh_revises_catalog_without_replacing_active_playback_list() {
-        let active = PlaybackList {
-            source: player_core::PlaybackListSource::LikedSongs,
-            tracks: vec![playable("spotify:track:playing")].into(),
-            current_index: 0,
-        };
-        let current = Snapshot {
-            implicit_queue: Some(active.clone()),
-            ..Snapshot::default()
-        };
-        let mut catalog = CatalogProjection::default();
-        let done = LibraryState::Done {
-            section: LibrarySection::LikedSongs,
-            revision: CatalogRevision::new(0),
-            entries: vec![LibraryEntry::Track {
-                playable: playable("spotify:track:catalog"),
-                played_at_ms: None,
-            }],
-        };
-
-        let first = catalog.with_library(current.clone(), done.clone());
-        let first_revision = match first.library {
-            LibraryState::Done { revision, .. } => revision,
-            _ => unreachable!(),
-        };
-        assert_eq!(first.implicit_queue.as_ref(), Some(&active));
-
-        let loading = catalog.with_library(
-            current.clone(),
-            LibraryState::Loading {
-                section: LibrarySection::LikedSongs,
-            },
-        );
-        assert!(matches!(loading.library, LibraryState::Loading { .. }));
-        assert_eq!(loading.implicit_queue.as_ref(), Some(&active));
-
-        let refreshed = catalog.with_library(current.clone(), done);
-        assert!(matches!(
-            refreshed.library,
-            LibraryState::Done { revision, .. } if revision > first_revision
-        ));
-        assert_eq!(refreshed.implicit_queue.as_ref(), Some(&active));
-
-        let failed = catalog.with_library(
-            current,
-            LibraryState::Failed {
-                section: LibrarySection::LikedSongs,
-                message: "offline".to_string(),
-            },
-        );
-        assert!(matches!(failed.library, LibraryState::Failed { .. }));
-        assert_eq!(failed.implicit_queue.as_ref(), Some(&active));
     }
 }
 
@@ -1050,7 +825,7 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
     match entries {
         Some(entries) => LibraryState::Done {
             section,
-            revision: CatalogRevision::new(0),
+            revision: CatalogRevision::new(fork.library_revision),
             entries,
         },
         None => LibraryState::Loading { section },
@@ -1090,7 +865,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
     {
         SearchState::Done {
             query,
-            revision: CatalogRevision::new(0),
+            revision: CatalogRevision::new(fork.search_revision),
             results: SearchResults {
                 tracks: fork
                     .search_tracks
@@ -1159,7 +934,7 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
 
     let search_detail = fork.search_detail.as_ref().map(|detail| match detail {
         frontend::SearchDetail::Artist { tracks, albums } => SearchDetail::Artist {
-            revision: CatalogRevision::new(0),
+            revision: CatalogRevision::new(fork.detail_revision),
             tracks: tracks.iter().filter_map(playable_from_track).collect(),
             albums: albums
                 .iter()
@@ -1179,11 +954,11 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
                 .collect(),
         },
         frontend::SearchDetail::Album { tracks } => SearchDetail::Album {
-            revision: CatalogRevision::new(0),
+            revision: CatalogRevision::new(fork.detail_revision),
             tracks: tracks.iter().filter_map(playable_from_track).collect(),
         },
         frontend::SearchDetail::Playlist { tracks } => SearchDetail::Playlist {
-            revision: CatalogRevision::new(0),
+            revision: CatalogRevision::new(fork.detail_revision),
             tracks: tracks.iter().filter_map(playable_from_track).collect(),
         },
     });
