@@ -6,8 +6,8 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::*, px, uniform_list,
+    AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, ParentElement,
+    SharedString, Styled, div, prelude::*, px, uniform_list,
 };
 use player_core::{LibraryEntry, LibrarySection, LibraryState};
 
@@ -123,6 +123,7 @@ pub(crate) fn track_row(
 ) -> impl IntoElement {
     let play = playable.clone();
     let enqueue = playable.clone();
+    let context_playable = playable.clone();
     div()
         .id(SharedString::from(format!("library-track-{index}")))
         .w_full()
@@ -138,6 +139,15 @@ pub(crate) fn track_row(
         .hover(|style| style.bg(tone(PANEL, 0.60)))
         .on_click(
             cx.listener(move |app, _, _, _| app.send(player_core::Command::Play(play.clone()))),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                app.open_track_context_menu(context_playable.clone(), event.position);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+            }),
         )
         .child(two_line_cell(
             playable.title.clone(),

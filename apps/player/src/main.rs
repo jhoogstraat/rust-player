@@ -16,13 +16,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, FontWeight, Hsla, IntoElement, KeyBinding,
-    ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, actions, div, hsla, prelude::*, px, relative, rgb,
+    Anchor, AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, anchored, deferred,
+    div, hsla, prelude::*, px, relative, rgb,
 };
 use player_core::{
-    Command, LibraryState, LoginState, Runtime, SearchDetail, SearchState, SearchTarget, Snapshot,
-    fake::FakeRuntime,
+    Command, LibraryState, LoginState, Playable, Runtime, SearchAlbum, SearchDetail, SearchState,
+    SearchTarget, Snapshot, fake::FakeRuntime,
 };
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
@@ -89,6 +90,18 @@ struct PlayerApp {
     paste: TextField,
     search_history: Vec<Option<SearchTarget>>,
     search_history_index: usize,
+    context_menu: Option<ContextMenu>,
+}
+
+enum ContextMenu {
+    Track {
+        playable: Playable,
+        position: Point<Pixels>,
+    },
+    Album {
+        album: SearchAlbum,
+        position: Point<Pixels>,
+    },
 }
 
 impl PlayerApp {
@@ -100,11 +113,248 @@ impl PlayerApp {
     }
 
     fn open_search_target(&mut self, target: SearchTarget, cx: &mut Context<Self>) {
+        self.nav = sidebar::NavSection::Search;
         self.search_history.truncate(self.search_history_index + 1);
         self.search_history.push(Some(target.clone()));
         self.search_history_index += 1;
         self.send(Command::OpenSearchTarget(target));
         cx.notify();
+    }
+
+    fn search_for(&mut self, query: String, cx: &mut Context<Self>) {
+        self.nav = sidebar::NavSection::Search;
+        self.search.clear();
+        self.search_history = vec![None];
+        self.search_history_index = 0;
+        self.send(Command::Search(query));
+        cx.notify();
+    }
+
+    fn artist_target(&self, name: &str) -> Option<SearchTarget> {
+        if let SearchState::Done { results, .. } = &self.snapshot.search
+            && let Some(artist) = results.artists.iter().find(|artist| artist.name == name)
+        {
+            return Some(SearchTarget::Artist {
+                locator: artist.locator.clone(),
+                name: artist.name.clone(),
+            });
+        }
+
+        self.search_history
+            .get(self.search_history_index)
+            .and_then(|target| target.as_ref())
+            .and_then(|target| match target {
+                SearchTarget::Artist {
+                    locator,
+                    name: target_name,
+                } if target_name == name => Some(SearchTarget::Artist {
+                    locator: locator.clone(),
+                    name: target_name.clone(),
+                }),
+                _ => None,
+            })
+    }
+
+    fn album_target(&self, name: &str) -> Option<SearchTarget> {
+        if let SearchState::Done { results, .. } = &self.snapshot.search
+            && let Some(album) = results.albums.iter().find(|album| album.name == name)
+        {
+            return Some(SearchTarget::Album {
+                locator: album.locator.clone(),
+                name: album.name.clone(),
+            });
+        }
+
+        if let Some(target) = self
+            .search_history
+            .get(self.search_history_index)
+            .and_then(|target| target.as_ref())
+            && let SearchTarget::Album {
+                locator,
+                name: target_name,
+            } = target
+            && target_name == name
+        {
+            return Some(SearchTarget::Album {
+                locator: locator.clone(),
+                name: target_name.clone(),
+            });
+        }
+
+        if let Some(SearchDetail::Artist { albums, .. }) = &self.snapshot.search_detail
+            && let Some(album) = albums.iter().find(|album| album.name == name)
+        {
+            return Some(SearchTarget::Album {
+                locator: album.locator.clone(),
+                name: album.name.clone(),
+            });
+        }
+
+        None
+    }
+
+    fn open_named_target(
+        &mut self,
+        target: Option<SearchTarget>,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = target {
+            self.open_search_target(target, cx);
+        } else {
+            self.search_for(name, cx);
+        }
+        self.close_context_menu(cx);
+    }
+
+    pub(crate) fn open_track_context_menu(&mut self, playable: Playable, position: Point<Pixels>) {
+        self.context_menu = Some(ContextMenu::Track { playable, position });
+    }
+
+    fn open_album_context_menu(&mut self, album: SearchAlbum, position: Point<Pixels>) {
+        self.context_menu = Some(ContextMenu::Album { album, position });
+    }
+
+    fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn context_menu_item(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let id: SharedString = id.into();
+        div()
+            .id(id)
+            .w_full()
+            .px(px(9.))
+            .py(px(7.))
+            .rounded(px(6.))
+            .text_size(px(13.))
+            .cursor_pointer()
+            .hover(|style| style.bg(wash(0.10)))
+            .on_click(handler)
+            .child(label.into())
+    }
+
+    fn render_context_menu(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(menu) = &self.context_menu else {
+            return div().into_any_element();
+        };
+        let position = match menu {
+            ContextMenu::Track { position, .. } | ContextMenu::Album { position, .. } => *position,
+        };
+        let menu_id = match menu {
+            ContextMenu::Track { .. } => "track-context-menu",
+            ContextMenu::Album { .. } => "album-context-menu",
+        };
+        let mut card = div()
+            .id(menu_id)
+            .w(px(230.))
+            .p(px(4.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(border())
+            .bg(tone(PANEL, 0.96))
+            .shadow_lg()
+            .text_color(rgb(TEXT))
+            .on_mouse_down_out(cx.listener(|app, _, _, cx| app.close_context_menu(cx)));
+
+        match menu {
+            ContextMenu::Track { playable, .. } => {
+                let play = playable.clone();
+                let enqueue = playable.clone();
+                card = card
+                    .child(Self::context_menu_item(
+                        "context-play-track",
+                        "Play",
+                        cx.listener(move |app, _, _, cx| {
+                            app.send(Command::Play(play.clone()));
+                            app.close_context_menu(cx);
+                        }),
+                    ))
+                    .child(Self::context_menu_item(
+                        "context-enqueue-track",
+                        "Add to queue",
+                        cx.listener(move |app, _, _, cx| {
+                            app.send(Command::Enqueue(enqueue.clone()));
+                            app.close_context_menu(cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.)).my(px(4.)).bg(border()));
+
+                for (index, artist) in playable
+                    .artists
+                    .iter()
+                    .filter(|artist| !artist.is_empty())
+                    .enumerate()
+                {
+                    let artist = artist.clone();
+                    let target = self.artist_target(&artist);
+                    card = card.child(Self::context_menu_item(
+                        SharedString::from(format!("context-track-artist-{index}")),
+                        format!("Go to {artist}"),
+                        cx.listener(move |app, _, _, cx| {
+                            app.open_named_target(target.clone(), artist.clone(), cx);
+                        }),
+                    ));
+                }
+
+                let album = playable.album.clone();
+                if !album.is_empty() {
+                    let target = self.album_target(&album);
+                    card = card.child(Self::context_menu_item(
+                        "context-track-album",
+                        format!("Go to {album}"),
+                        cx.listener(move |app, _, _, cx| {
+                            app.open_named_target(target.clone(), album.clone(), cx);
+                        }),
+                    ));
+                }
+            }
+            ContextMenu::Album { album, .. } => {
+                let target = SearchTarget::Album {
+                    locator: album.locator.clone(),
+                    name: album.name.clone(),
+                };
+                let artists = album.artists.clone();
+                card = card.child(Self::context_menu_item(
+                    "context-open-album",
+                    "Open album",
+                    cx.listener(move |app, _, _, cx| {
+                        app.open_search_target(target.clone(), cx);
+                        app.close_context_menu(cx);
+                    }),
+                ));
+                for (index, artist) in artists
+                    .into_iter()
+                    .filter(|artist| !artist.is_empty())
+                    .enumerate()
+                {
+                    let target = self.artist_target(&artist);
+                    card = card.child(Self::context_menu_item(
+                        SharedString::from(format!("context-album-artist-{index}")),
+                        format!("Go to {artist}"),
+                        cx.listener(move |app, _, _, cx| {
+                            app.open_named_target(target.clone(), artist.clone(), cx);
+                        }),
+                    ));
+                }
+            }
+        }
+
+        deferred(
+            anchored()
+                .position(position)
+                .anchor(Anchor::TopLeft)
+                .snap_to_window_with_margin(px(8.))
+                .child(div().occlude().child(card)),
+        )
+        .priority(1)
+        .into_any_element()
     }
 
     fn move_search_history(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -123,6 +373,11 @@ impl PlayerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape" && self.context_menu.is_some() {
+            self.close_context_menu(cx);
+            return;
+        }
+
         let focused_field = if self.search.focus.is_focused(window) {
             Some(true)
         } else if self.paste.focus.is_focused(window) {
@@ -220,6 +475,13 @@ impl Render for PlayerApp {
             .on_action(cx.listener(|app, _: &VolumeDown, _, _| {
                 app.send(volume_command(&app.snapshot, -10));
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|app, _, window, cx| {
+                    app.close_context_menu(cx);
+                    window.prevent_default();
+                }),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -279,6 +541,7 @@ impl Render for PlayerApp {
             }))
             // Now-playing bar
             .child(self.render_now_playing(&snap, cx))
+            .child(self.render_context_menu(cx))
             // Transport row
             .child(
                 div()
@@ -496,6 +759,7 @@ impl PlayerApp {
                                 locator: album.locator.clone(),
                                 name: album.name.clone(),
                             };
+                            let context_album = album.clone();
                             div()
                                 .id(SharedString::from(format!("artist-album-{i}")))
                                 .w_full()
@@ -510,6 +774,18 @@ impl PlayerApp {
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.open_search_target(target.clone(), cx);
                                 }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                                        app.open_album_context_menu(
+                                            context_album.clone(),
+                                            event.position,
+                                        );
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }),
+                                )
                                 .child(library::two_line_cell(
                                     album.name.clone(),
                                     album.artists.join(", "),
@@ -579,6 +855,7 @@ impl PlayerApp {
                                 locator: album.locator.clone(),
                                 name: album.name.clone(),
                             };
+                            let context_album = album.clone();
                             div()
                                 .id(SharedString::from(format!("album-{i}")))
                                 .w_full()
@@ -593,6 +870,18 @@ impl PlayerApp {
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.open_search_target(target.clone(), cx)
                                 }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                                        app.open_album_context_menu(
+                                            context_album.clone(),
+                                            event.position,
+                                        );
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }),
+                                )
                                 .child(library::two_line_cell(
                                     album.name.clone(),
                                     album.artists.join(", "),
@@ -1092,6 +1381,7 @@ fn open_player_window(cx: &mut App) {
                     paste: TextField::new(cx, "http://127.0.0.1:8989/login?code=…"),
                     search_history: vec![None],
                     search_history_index: 0,
+                    context_menu: None,
                 }
             });
             // Shortcuts work from the first frame, before any click.
