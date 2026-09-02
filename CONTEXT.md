@@ -37,6 +37,10 @@ _Avoid_: Connect playback, external playback
 A piece of source-owned content resolved far enough that a Playback Session can queue or start it.
 _Avoid_: Track, media item, song
 
+**Cover Art**:
+The visual artwork for a Playable, album, or other browsable music item. A Music Source may make it available; the window renders it as presentation, not as playback state.
+_Avoid_: Terminal image, cover theme
+
 **Playback Session**:
 The listener's current playback activity, including its active Playable, queue, transport state, and Playback Device. The engine folds it from typed events; the window projects its moving position locally between snapshots.
 _Avoid_: Player, playback state, audio session
