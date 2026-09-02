@@ -191,7 +191,7 @@ enum ContextMenu {
 impl PlayerApp {
     fn send(&self, command: Command) {
         let runtime = RUNTIME.get().expect("runtime");
-        if !runtime.command(command.clone()) {
+        if runtime.command(command.clone()).is_none() {
             log::warn!("[ui] runtime rejected {command:?}");
         }
     }

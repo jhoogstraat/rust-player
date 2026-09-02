@@ -116,13 +116,103 @@ fn fake_runtime_paused_idle_publishes_no_snapshots() {
 }
 
 #[test]
+fn fake_runtime_acknowledges_only_after_the_command_is_folded() {
+    let runtime = player_core::fake::FakeRuntime::new();
+    let track = playable();
+
+    let outcome = runtime.command(Command::Enqueue(track.clone()));
+    assert_eq!(
+        outcome,
+        Some(player_core::ActionOutcome::Queued { accepted: 1 })
+    );
+    let rx = runtime.subscribe();
+    assert_eq!(rx.borrow().queue.len(), 1);
+    assert_eq!(rx.borrow().queue[0], track);
+
+    let invalid = runtime.command(Command::PlayFromList {
+        list: Arc::new(PlaybackList {
+            source: PlaybackListSource::LikedSongs,
+            tracks: Vec::<Playable>::new().into(),
+            current_index: 0,
+        }),
+        index: 0,
+    });
+    assert_eq!(invalid, None);
+
+    let mut radio = track;
+    radio.locator = "radio:https://example.com/live".into();
+    assert_eq!(
+        runtime.command(Command::Enqueue(radio)),
+        Some(player_core::ActionOutcome::Queued { accepted: 0 })
+    );
+    assert_eq!(runtime.subscribe().borrow().queue.len(), 1);
+    runtime.shutdown();
+}
+
+#[test]
+fn fake_runtime_orders_a_command_after_a_pending_worker_completion() {
+    let runtime = player_core::fake::FakeRuntime::new();
+    let rx = runtime.subscribe();
+    let track = playable();
+
+    // Search publishes Loading and is acknowledged before its delayed Done
+    // completion. The next command must wait behind that completion in the
+    // worker's event order, then acknowledge only after playback is folded.
+    assert_eq!(
+        runtime.command(Command::Search("blue".to_string())),
+        Some(player_core::ActionOutcome::Applied)
+    );
+    assert!(matches!(rx.borrow().search, SearchState::Loading { .. }));
+    assert_eq!(
+        runtime.command(Command::Play(track.clone())),
+        Some(player_core::ActionOutcome::Applied)
+    );
+    let folded = rx.borrow().clone();
+    assert!(matches!(folded.search, SearchState::Done { .. }));
+    assert_eq!(folded.playback.as_ref().map(|p| &p.playable), Some(&track));
+
+    runtime.shutdown();
+    assert_eq!(runtime.command(Command::Pause), None);
+}
+
+#[test]
+fn fake_runtime_rejects_auth_commands_without_the_matching_state() {
+    let runtime = player_core::fake::FakeRuntime::new();
+    assert_eq!(
+        runtime.command(Command::Reauthenticate),
+        Some(player_core::ActionOutcome::Applied)
+    );
+    assert_eq!(
+        runtime.command(Command::SubmitPastedLoginUrl("https://invalid".into())),
+        None
+    );
+
+    let expired = Snapshot {
+        login: LoginState::Expired {
+            message: "expired".into(),
+        },
+        ..Snapshot::default()
+    };
+    runtime.script_snapshot(expired);
+    assert_eq!(
+        runtime.command(Command::Reauthenticate),
+        Some(player_core::ActionOutcome::Accepted)
+    );
+    runtime.shutdown();
+}
+
+#[test]
 fn fake_runtime_answers_commands_with_snapshots() {
     block_on(async {
         let runtime = player_core::fake::FakeRuntime::new();
         let mut rx = runtime.subscribe();
         assert_eq!(rx.borrow().login, LoginState::Ready);
 
-        assert!(runtime.command(Command::Search("blue".to_string())));
+        assert!(
+            runtime
+                .command(Command::Search("blue".to_string()))
+                .is_some()
+        );
         // Loading is published first and stays visible long enough to see.
         let loading = rx
             .wait_for(|snap| matches!(snap.search, SearchState::Loading { .. }))
@@ -151,20 +241,24 @@ fn fake_runtime_answers_commands_with_snapshots() {
         }
         drop(done);
 
-        runtime.command(Command::Play(playable()));
+        assert!(runtime.command(Command::Play(playable())).is_some());
         rx.changed().await.unwrap();
         let snap = rx.borrow().clone();
         assert!(snap.is_playing());
         assert_eq!(snap.playback.as_ref().unwrap().volume_percent, Some(80));
 
-        runtime.command(Command::Enqueue(playable()));
+        assert!(runtime.command(Command::Enqueue(playable())).is_some());
         rx.changed().await.unwrap();
         assert_eq!(rx.borrow().queue.len(), 1);
-        runtime.command(Command::MoveQueued {
-            index: 0,
-            up: false,
-        });
-        runtime.command(Command::RemoveQueued(0));
+        assert!(
+            runtime
+                .command(Command::MoveQueued {
+                    index: 0,
+                    up: false,
+                })
+                .is_some()
+        );
+        assert!(runtime.command(Command::RemoveQueued(0)).is_some());
         rx.changed().await.unwrap();
         assert!(rx.borrow().queue.is_empty());
 
@@ -190,20 +284,24 @@ fn fake_runtime_prioritizes_explicit_queue_then_resumes_implicit_list() {
             tracks: vec![first.clone(), second.clone()].into(),
             current_index: 0,
         };
-        assert!(runtime.command(Command::PlayFromList {
-            list: Arc::new(list),
-            index: 0,
-        }));
+        assert!(
+            runtime
+                .command(Command::PlayFromList {
+                    list: Arc::new(list),
+                    index: 0,
+                })
+                .is_some()
+        );
         rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&first))
             .await
             .unwrap();
 
-        assert!(runtime.command(Command::Enqueue(queued.clone())));
+        assert!(runtime.command(Command::Enqueue(queued.clone())).is_some());
         rx.wait_for(|snap| snap.queue == [queued.clone()])
             .await
             .unwrap();
 
-        assert!(runtime.command(Command::Next));
+        assert!(runtime.command(Command::Next).is_some());
         rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&queued))
             .await
             .unwrap();
@@ -212,7 +310,7 @@ fn fake_runtime_prioritizes_explicit_queue_then_resumes_implicit_list() {
             0
         );
 
-        assert!(runtime.command(Command::Next));
+        assert!(runtime.command(Command::Next).is_some());
         rx.wait_for(|snap| snap.playback.as_ref().map(|p| &p.playable) == Some(&second))
             .await
             .unwrap();
@@ -261,7 +359,7 @@ fn fake_runtime_browses_every_library_section() {
             LibrarySection::RecentlyPlayed,
             LibrarySection::Playlists,
         ] {
-            assert!(runtime.command(Command::Browse(section)));
+            assert!(runtime.command(Command::Browse(section)).is_some());
             let loading = rx
                 .wait_for(|snap| {
                     matches!(snap.library, LibraryState::Loading { section: s } if s == section)

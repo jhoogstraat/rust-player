@@ -10,13 +10,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::{
-    AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
-    Playable, PlaybackDevice, PlaybackList, PlaybackListProjector, PlaybackStatus, SearchAlbum,
-    SearchArtist, SearchPlaylist, SearchResults, SearchState, Snapshot,
+    ActionOutcome, AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection,
+    LibraryState, LoginState, Playable, PlaybackDevice, PlaybackList, PlaybackListProjector,
+    PlaybackStatus, SearchAlbum, SearchArtist, SearchPlaylist, SearchResults, SearchState,
+    Snapshot,
 };
 
 /// How long a scripted search stays in `Loading` so the state is visible.
 const SEARCH_DELAY: Duration = Duration::from_millis(150);
+type CommandReply = mpsc::Sender<Option<ActionOutcome>>;
+type CommandRequest = (Command, CommandReply);
 
 fn canned_track(name: &str, artist: &str, album: &str, duration_ms: u64, id: &str) -> Playable {
     Playable {
@@ -134,7 +137,7 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
 /// before resolving to canned results.
 pub struct FakeRuntime {
     tx: watch::Sender<Snapshot>,
-    commands: mpsc::Sender<Command>,
+    commands: Mutex<Option<mpsc::Sender<CommandRequest>>>,
     state: Arc<Mutex<Snapshot>>,
     projector: Arc<Mutex<PlaybackListProjector>>,
     stop: Arc<AtomicBool>,
@@ -149,7 +152,7 @@ impl FakeRuntime {
             ..Snapshot::default()
         };
         let (tx, _rx) = watch::channel(initial.clone());
-        let (commands, command_rx) = mpsc::channel::<Command>();
+        let (commands, command_rx) = mpsc::channel::<CommandRequest>();
         let state = Arc::new(Mutex::new(initial));
         let projector = Arc::new(Mutex::new(PlaybackListProjector::default()));
         let next_revision = Arc::new(AtomicU64::new(1));
@@ -165,12 +168,13 @@ impl FakeRuntime {
             .spawn(move || {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match command_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(command) => apply(
+                        Ok((command, reply)) => apply(
                             &worker_state,
                             &worker_tx,
                             &worker_projector,
                             &worker_revision,
                             command,
+                            reply,
                         ),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -181,7 +185,7 @@ impl FakeRuntime {
 
         FakeRuntime {
             tx,
-            commands,
+            commands: Mutex::new(Some(commands)),
             state,
             projector,
             stop,
@@ -227,6 +231,7 @@ fn apply(
     projector: &Mutex<PlaybackListProjector>,
     next_revision: &AtomicU64,
     command: Command,
+    reply: mpsc::Sender<Option<ActionOutcome>>,
 ) {
     if let Command::Search(query) = command {
         projector.lock().unwrap().clear();
@@ -234,6 +239,9 @@ fn apply(
             query: query.clone(),
         };
         publish(state, tx);
+        // A command is acknowledged once its loading fact is folded. The
+        // eventual Done fact is an independent worker completion.
+        let _ = reply.send(Some(ActionOutcome::Applied));
         std::thread::sleep(SEARCH_DELAY);
         let needle = query.to_lowercase();
         let results: Vec<Playable> = canned_results()
@@ -268,6 +276,7 @@ fn apply(
         projector.lock().unwrap().clear();
         state.lock().unwrap().library = LibraryState::Loading { section };
         publish(state, tx);
+        let _ = reply.send(Some(ActionOutcome::Applied));
         std::thread::sleep(SEARCH_DELAY);
         let done = LibraryState::Done {
             section,
@@ -281,6 +290,34 @@ fn apply(
     }
 
     let mut snap = state.lock().unwrap();
+    let accepted = !matches!(&command, Command::PlayFromList { list, index }
+        if list.tracks.is_empty() || *index >= list.tracks.len());
+    let auth_accepted = match &command {
+        Command::SubmitPastedLoginUrl(_) => matches!(
+            &snap.login,
+            LoginState::InProgress {
+                wants_pasted_url: true,
+                ..
+            }
+        ),
+        Command::Reauthenticate => {
+            matches!(&snap.login, LoginState::Ready | LoginState::Expired { .. })
+        }
+        _ => true,
+    };
+    let queue_accepted = match &command {
+        Command::Enqueue(playable) => !playable.locator.starts_with("radio:"),
+        _ => true,
+    };
+    if !accepted || !auth_accepted {
+        let _ = reply.send(None);
+        return;
+    }
+    let preboot_retry = matches!(
+        (&command, &snap.login),
+        (Command::Reauthenticate, LoginState::Expired { .. })
+    );
+    let enqueue = matches!(&command, Command::Enqueue(_));
     match command {
         Command::Search(_) | Command::Browse(_) => unreachable!("handled above"),
         Command::OpenSearchTarget(_) => {}
@@ -344,7 +381,8 @@ fn apply(
                 p.volume_percent = Some(percent.min(100));
             }
         }
-        Command::Enqueue(playable) => snap.queue.push(playable),
+        Command::Enqueue(playable) if queue_accepted => snap.queue.push(playable),
+        Command::Enqueue(_) => {}
         Command::RemoveQueued(index) => {
             if index < snap.queue.len() {
                 snap.queue.remove(index);
@@ -363,6 +401,16 @@ fn apply(
     }
     drop(snap);
     publish(state, tx);
+    let outcome = if preboot_retry {
+        ActionOutcome::Accepted
+    } else if enqueue {
+        ActionOutcome::Queued {
+            accepted: usize::from(queue_accepted),
+        }
+    } else {
+        ActionOutcome::Applied
+    };
+    let _ = reply.send(Some(outcome));
 }
 
 fn start_playback(snapshot: &mut Snapshot, playable: Playable) {
@@ -406,12 +454,17 @@ impl crate::Runtime for FakeRuntime {
         self.tx.subscribe()
     }
 
-    fn command(&self, command: Command) -> bool {
-        self.commands.send(command).is_ok()
+    fn command(&self, command: Command) -> Option<ActionOutcome> {
+        let (reply, result) = mpsc::channel();
+        let commands = self.commands.lock().unwrap();
+        commands.as_ref()?.send((command, reply)).ok()?;
+        drop(commands);
+        result.recv().ok().flatten()
     }
 
     fn shutdown(&self) {
         // End the worker thread; the process is on its way out.
         self.stop.store(true, Ordering::Relaxed);
+        self.commands.lock().unwrap().take();
     }
 }

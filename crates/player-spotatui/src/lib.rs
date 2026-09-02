@@ -1,7 +1,9 @@
 //! The adapter that maps the source-neutral contract onto the Spotatui
 //! fork's `frontend` module. Playback ordering remains engine-owned; this
 //! adapter carries source-neutral implicit-list metadata and maps commands to
-//! fork actions. The application crate never imports the fork.
+//! fold-acknowledged fork actions. Pre-boot auth channels return
+//! [`player_core::ActionOutcome::Accepted`] because no fold exists yet. The
+//! application crate never imports the fork.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,10 +13,10 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::watch;
 
 use player_core::{
-    AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
-    Notice, Playable, PlaybackDevice, PlaybackList, PlaybackListProjector, PlaybackStatus, Runtime,
-    SearchAlbum, SearchArtist, SearchDetail, SearchPlaylist, SearchResults, SearchState,
-    SearchTarget, Snapshot, Source,
+    ActionOutcome, AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection,
+    LibraryState, LoginState, Notice, Playable, PlaybackDevice, PlaybackList,
+    PlaybackListProjector, PlaybackStatus, Runtime, SearchAlbum, SearchArtist, SearchDetail,
+    SearchPlaylist, SearchResults, SearchState, SearchTarget, Snapshot, Source,
 };
 use spotatui::frontend::{self, EngineAction, LibraryTarget, Onboarding};
 
@@ -113,6 +115,8 @@ impl Onboarding for BootOnboarding {
 
 pub struct SpotatuiPlayer {
     tx: watch::Sender<Snapshot>,
+    /// Serializes command dispatch with implicit-list metadata updates.
+    command_lock: Mutex<()>,
     /// Present once boot succeeded; taken by `shutdown`.
     frontend: Mutex<Option<frontend::Runtime>>,
     /// The source list that should resume after the explicit queue drains.
@@ -133,6 +137,7 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
     let (retry_boot_tx, retry_boot_rx) = mpsc::channel::<()>();
     let player = Arc::new(SpotatuiPlayer {
         tx: tx.clone(),
+        command_lock: Mutex::new(()),
         frontend: Mutex::new(None),
         implicit_queue: Arc::default(),
         paste_url_tx,
@@ -243,7 +248,8 @@ impl Runtime for SpotatuiPlayer {
         self.tx.subscribe()
     }
 
-    fn command(&self, command: Command) -> bool {
+    fn command(&self, command: Command) -> Option<ActionOutcome> {
+        let _command_guard = self.command_lock.lock().unwrap();
         match command {
             Command::SubmitPastedLoginUrl(url) => {
                 let prompt_open = matches!(
@@ -253,11 +259,12 @@ impl Runtime for SpotatuiPlayer {
                         ..
                     }
                 );
-                prompt_open && self.paste_url_tx.send(url).is_ok()
+                (prompt_open && self.paste_url_tx.send(url).is_ok())
+                    .then_some(ActionOutcome::Accepted)
             }
-            Command::Search(query) => self
-                .with_frontend(|runtime| runtime.apply(EngineAction::SearchActiveSource(query)))
-                .is_some(),
+            Command::Search(query) => self.with_frontend(|runtime| {
+                map_outcome(runtime.apply(EngineAction::SearchActiveSource(query)))
+            }),
             Command::OpenSearchTarget(target) => self
                 .with_frontend(|runtime| {
                     runtime.apply(EngineAction::Open(match target {
@@ -275,41 +282,40 @@ impl Runtime for SpotatuiPlayer {
                         },
                     }))
                 })
-                .is_some(),
+                .map(map_outcome),
             Command::Reauthenticate => {
-                let staged = self
-                    .with_frontend(|runtime| runtime.apply(EngineAction::BeginSpotifyLogin))
-                    .is_some();
-                // Before a successful boot the only re-login is another boot.
-                staged
-                    || (matches!(self.login(), LoginState::Expired { .. })
-                        && self.retry_boot_tx.send(()).is_ok())
+                if let Some(outcome) =
+                    self.with_frontend(|runtime| runtime.apply(EngineAction::BeginSpotifyLogin))
+                {
+                    Some(map_outcome(outcome))
+                } else if matches!(self.login(), LoginState::Expired { .. })
+                    && self.retry_boot_tx.send(()).is_ok()
+                {
+                    // Before a successful boot the retry is a channel handoff;
+                    // no fold exists yet to produce `Applied`.
+                    Some(ActionOutcome::Accepted)
+                } else {
+                    None
+                }
             }
-            Command::Browse(section) => self
-                .with_frontend(|runtime| {
-                    runtime.apply(EngineAction::OpenLibrary(match section {
-                        LibrarySection::Playlists => LibraryTarget::Playlists,
-                        LibrarySection::LikedSongs => LibraryTarget::LikedSongs,
-                        LibrarySection::RecentlyPlayed => LibraryTarget::RecentlyPlayed,
-                    }))
-                })
-                .is_some(),
+            Command::Browse(section) => self.with_frontend(|runtime| {
+                map_outcome(runtime.apply(EngineAction::OpenLibrary(match section {
+                    LibrarySection::Playlists => LibraryTarget::Playlists,
+                    LibrarySection::LikedSongs => LibraryTarget::LikedSongs,
+                    LibrarySection::RecentlyPlayed => LibraryTarget::RecentlyPlayed,
+                })))
+            }),
             Command::Play(playable) => {
-                let Some(()) = self.with_frontend(|_| ()) else {
-                    return false;
-                };
+                self.with_frontend(|_| ())?;
                 *self.implicit_queue.lock().unwrap() = None;
                 self.with_frontend(|runtime| dispatch_command(runtime, Command::Play(playable)))
-                    .is_some()
             }
             Command::PlayFromList { list, index } => {
                 let mut list = (*list).clone();
                 if list.tracks.is_empty() || index >= list.tracks.len() {
-                    return false;
+                    return None;
                 }
-                let Some(()) = self.with_frontend(|_| ()) else {
-                    return false;
-                };
+                self.with_frontend(|_| ())?;
                 list.current_index = index;
                 *self.implicit_queue.lock().unwrap() = Some(list.clone());
                 self.with_frontend(|runtime| {
@@ -321,11 +327,8 @@ impl Runtime for SpotatuiPlayer {
                         },
                     )
                 })
-                .is_some()
             }
-            other => self
-                .with_frontend(|runtime| dispatch_command(runtime, other))
-                .is_some(),
+            other => self.with_frontend(|runtime| dispatch_command(runtime, other)),
         }
     }
 
@@ -350,9 +353,16 @@ fn publish(tx: &watch::Sender<Snapshot>, next: Snapshot) {
     });
 }
 
-fn dispatch_command(runtime: &frontend::Runtime, command: Command) {
+fn dispatch_command(runtime: &frontend::Runtime, command: Command) -> ActionOutcome {
     let action = action_for_command(command);
-    let _outcome = runtime.apply(action);
+    map_outcome(runtime.apply(action))
+}
+
+fn map_outcome(outcome: frontend::ActionOutcome) -> ActionOutcome {
+    match outcome {
+        frontend::ActionOutcome::Applied => ActionOutcome::Applied,
+        frontend::ActionOutcome::Queued { accepted } => ActionOutcome::Queued { accepted },
+    }
 }
 
 fn action_for_command(command: Command) -> EngineAction {
@@ -473,6 +483,18 @@ mod tests {
                 ],
                 offset: Some(1),
             }
+        );
+    }
+
+    #[test]
+    fn action_outcomes_cross_the_adapter_without_losing_queue_counts() {
+        assert_eq!(
+            map_outcome(frontend::ActionOutcome::Applied),
+            ActionOutcome::Applied
+        );
+        assert_eq!(
+            map_outcome(frontend::ActionOutcome::Queued { accepted: 3 }),
+            ActionOutcome::Queued { accepted: 3 }
         );
     }
 

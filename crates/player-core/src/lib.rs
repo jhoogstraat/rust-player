@@ -3,9 +3,9 @@
 //! Everything the version-one window renders or sends lives here: one
 //! snapshot value type the runtime publishes, one command vocabulary it
 //! sends, and a runtime trait shared by the real Spotatui adapter and a
-//! scripted fake. Commands are accepted or rejected synchronously; they
-//! never report completion — failures arrive later as notices in a
-//! published snapshot.
+//! scripted fake. Folded commands return an [`ActionOutcome`] only after the
+//! Event Spine applies them; pre-boot onboarding may return `Accepted` because
+//! it has no live fold yet. Failures arrive later as notices in a snapshot.
 //!
 //! This crate depends on nothing heavier than `tokio::sync`.
 
@@ -366,8 +366,19 @@ pub fn project_position(playback: &PlaybackStatus, now: Instant) -> u64 {
     }
 }
 
-/// Listener intent. Accepted or rejected synchronously by
-/// [`Runtime::command`]; completion never reported.
+/// What applying a [`Command`] produced after the Runtime folded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionOutcome {
+    /// The command was accepted and folded; nothing further to report.
+    Applied,
+    /// Accepted by a pre-boot channel that has no fold to acknowledge yet.
+    Accepted,
+    /// A batch queue operation reports how many Playables were accepted.
+    Queued { accepted: usize },
+}
+
+/// Listener intent. The Runtime returns an outcome only after the command has
+/// been folded in event order; `None` means it was rejected before folding.
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Complete the sign-in fallback when the callback listener could not bind.
@@ -406,9 +417,10 @@ pub trait Runtime: Send + Sync + 'static {
     /// Subscribe to immutable snapshots; the current state arrives immediately.
     fn subscribe(&self) -> watch::Receiver<Snapshot>;
 
-    /// Send one command. Returns whether it was accepted; failures surface
-    /// later as notices.
-    fn command(&self, command: Command) -> bool;
+    /// Send one command. The outcome is returned after the fold applies it;
+    /// failures surface later as notices. `None` means the command could not
+    /// be accepted (for example, an invalid list index or a closed runtime).
+    fn command(&self, command: Command) -> Option<ActionOutcome>;
 
     /// Stop playback and flush state cleanly. Blocks until done. Callable
     /// through a shared handle (the application's quit hook).
