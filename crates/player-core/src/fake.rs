@@ -11,8 +11,8 @@ use tokio::sync::watch;
 
 use crate::{
     AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
-    Playable, PlaybackList, PlaybackListProjector, PlaybackStatus, SearchAlbum, SearchArtist,
-    SearchPlaylist, SearchResults, SearchState, Snapshot,
+    Playable, PlaybackDevice, PlaybackList, PlaybackListProjector, PlaybackStatus, SearchAlbum,
+    SearchArtist, SearchPlaylist, SearchResults, SearchState, Snapshot,
 };
 
 /// How long a scripted search stays in `Loading` so the state is visible.
@@ -373,6 +373,7 @@ fn start_playback(snapshot: &mut Snapshot, playable: Playable) {
         .or(Some(80));
     snapshot.playback = Some(PlaybackStatus {
         playable,
+        device: PlaybackDevice::Native,
         is_playing: true,
         position_ms: 0,
         observed_at: Instant::now(),

@@ -12,9 +12,9 @@ use tokio::sync::watch;
 
 use player_core::{
     AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
-    Notice, Playable, PlaybackList, PlaybackListProjector, PlaybackStatus, Runtime, SearchAlbum,
-    SearchArtist, SearchDetail, SearchPlaylist, SearchResults, SearchState, SearchTarget, Snapshot,
-    Source,
+    Notice, Playable, PlaybackDevice, PlaybackList, PlaybackListProjector, PlaybackStatus, Runtime,
+    SearchAlbum, SearchArtist, SearchDetail, SearchPlaylist, SearchResults, SearchState,
+    SearchTarget, Snapshot, Source,
 };
 use spotatui::frontend::{self, EngineAction, LibraryTarget, Onboarding};
 
@@ -491,6 +491,7 @@ mod tests {
         };
         let playback = PlaybackStatus {
             playable: playable("spotify:track:second"),
+            device: PlaybackDevice::Native,
             is_playing: true,
             position_ms: 0,
             observed_at: std::time::Instant::now(),
@@ -588,25 +589,23 @@ mod tests {
 
     #[test]
     fn relayed_catalog_failure_keeps_playback_healthy() {
-        let mut snapshot = map_snapshot(
-            &frontend::Snapshot {
-                notice: Some("offline".to_string()),
-                notice_is_error: true,
-                spotify_connected: true,
-                audio_ready: true,
-                playback: Some(frontend::PlaybackState {
-                    track: Some(track("playing")),
-                    is_playing: true,
-                    progress_ms: 5,
-                    shuffle: false,
-                    repeat: "off".to_string(),
-                    volume_percent: None,
-                    device: None,
-                }),
-                ..Default::default()
-            },
-            None,
-        );
+        let fork = frontend::Snapshot {
+            notice: Some("offline".to_string()),
+            notice_is_error: true,
+            spotify_connected: true,
+            audio_ready: true,
+            playback: Some(frontend::PlaybackState {
+                track: Some(track("playing")),
+                is_playing: true,
+                progress_ms: 5,
+                shuffle: false,
+                repeat: "off".to_string(),
+                volume_percent: None,
+                device: None,
+            }),
+            ..Default::default()
+        };
+        let mut snapshot = map_snapshot(&fork, None);
         snapshot.library = LibraryState::Failed {
             section: LibrarySection::LikedSongs,
             message: "offline".to_string(),
@@ -617,7 +616,18 @@ mod tests {
         assert_eq!(snapshot.audio, AudioState::Ready);
         assert!(matches!(
             snapshot.playback,
-            Some(PlaybackStatus { playable, .. }) if playable.locator == "spotify:track:playing"
+            Some(PlaybackStatus { playable, device: PlaybackDevice::Remote, .. })
+                if playable.locator == "spotify:track:playing"
+        ));
+
+        let mut native = fork;
+        native.native_playback = true;
+        assert!(matches!(
+            map_snapshot(&native, None).playback,
+            Some(PlaybackStatus {
+                device: PlaybackDevice::Native,
+                ..
+            })
         ));
     }
 
@@ -912,6 +922,11 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
     let playback = fork.playback.as_ref().and_then(|state| {
         Some(PlaybackStatus {
             playable: playable_from_track(state.track.as_ref()?)?,
+            device: if fork.native_playback {
+                PlaybackDevice::Native
+            } else {
+                PlaybackDevice::Remote
+            },
             is_playing: state.is_playing,
             position_ms: fork.position_ms.unwrap_or(state.progress_ms),
             observed_at: fork.as_of,

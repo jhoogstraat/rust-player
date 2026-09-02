@@ -6582,7 +6582,7 @@ dependencies = [
 [[package]]
 name = "spotatui"
 version = "0.41.0"
-source = "git+https://github.com/jhoogstraat/spotatui?rev=bd39a10#bd39a10ed6c89a8e3397d996d73f95cf87529170"
+source = "git+https://github.com/jhoogstraat/spotatui?rev=ef6a2e1#ef6a2e15697b1a9a2f1c6f8841b503297afff3bc"
 dependencies = [
  "anyhow",
  "arboard",

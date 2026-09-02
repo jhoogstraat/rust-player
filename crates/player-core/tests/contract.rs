@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use player_core::{
     AudioState, Command, LibraryEntry, LibrarySection, LibraryState, LoginState, Playable,
-    PlaybackList, PlaybackListSource, PlaybackStatus, Runtime, SearchState, Snapshot, Source,
-    project_position,
+    PlaybackDevice, PlaybackList, PlaybackListSource, PlaybackStatus, Runtime, SearchState,
+    Snapshot, Source, project_position,
 };
 
 /// The contract crate itself stays runtime-free; tests drive async watch
@@ -31,6 +31,7 @@ fn playable() -> Playable {
 fn status(is_playing: bool) -> PlaybackStatus {
     PlaybackStatus {
         playable: playable(),
+        device: PlaybackDevice::Native,
         is_playing,
         position_ms: 10_000,
         observed_at: Instant::now(),
@@ -64,6 +65,15 @@ fn projection_is_frozen_while_paused() {
     let status = status(false);
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(project_position(&status, Instant::now()), 10_000);
+}
+
+#[test]
+fn playback_status_keeps_native_and_remote_modes_source_neutral() {
+    let mut status = status(true);
+    assert_eq!(status.device, PlaybackDevice::Native);
+
+    status.device = PlaybackDevice::Remote;
+    assert_eq!(status.device, PlaybackDevice::Remote);
 }
 
 #[test]

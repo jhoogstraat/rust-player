@@ -8,6 +8,7 @@
 mod icons;
 mod library;
 mod logging;
+mod now_playing;
 mod sidebar;
 mod text_input;
 
@@ -16,17 +17,16 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
 
 use gpui::{
     Anchor, AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, anchored, deferred,
-    div, hsla, prelude::*, px, relative, rgb, uniform_list,
+    div, hsla, prelude::*, px, rgb, uniform_list,
 };
 use player_core::{
-    Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListProjector, Runtime,
-    SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
+    AudioState, Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListProjector,
+    Runtime, SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
 };
 use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
@@ -110,7 +110,7 @@ impl Performance {
         }
     }
 
-    fn render(&self, elapsed: std::time::Duration, playing: bool) {
+    pub(crate) fn render(&self, elapsed: std::time::Duration, playing: bool) {
         if !self.enabled {
             return;
         }
@@ -158,6 +158,7 @@ fn data_root() -> PathBuf {
 struct PlayerApp {
     snapshot: Snapshot,
     performance: Arc<Performance>,
+    now_playing: gpui::Entity<now_playing::NowPlaying>,
     /// The active sidebar destination; library sections feed the second
     /// column, Settings swaps the main area.
     nav: sidebar::NavSection,
@@ -171,6 +172,7 @@ struct PlayerApp {
     show_playing_list: bool,
     playback_list_projector: RefCell<PlaybackListProjector>,
     context_menu: Option<ContextMenu>,
+    now_playing_subscription: Option<gpui::Subscription>,
 }
 
 enum ContextMenu {
@@ -649,11 +651,6 @@ fn clock(ms: u64) -> String {
 
 impl Render for PlayerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let playing = self.snapshot.is_playing();
-        let started = self.performance.enabled.then(Instant::now);
-        if playing {
-            window.request_animation_frame();
-        }
         let snap = &self.snapshot;
 
         let element = div()
@@ -756,7 +753,7 @@ impl Render for PlayerApp {
                     })
             }))
             // Now-playing bar
-            .child(self.render_now_playing(&snap, cx))
+            .child(self.now_playing.clone())
             .child(self.render_context_menu(cx))
             // Transport row
             .child(
@@ -813,9 +810,6 @@ impl Render for PlayerApp {
                             .child(log_path_label()),
                     ),
             );
-        if let Some(started) = started {
-            self.performance.render(started.elapsed(), playing);
-        }
         element
     }
 }
@@ -1317,99 +1311,6 @@ impl PlayerApp {
                     )
             }))
     }
-
-    fn render_now_playing(&self, snap: &Snapshot, cx: &Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        let has_playing_list = snap.implicit_queue.is_some();
-        let (title_line, position_ms, duration_ms, progress) = match &snap.playback {
-            Some(p) => {
-                let visible = snap.projected_position_ms(now).unwrap_or(p.position_ms);
-                let pct = if p.playable.duration_ms > 0 {
-                    (visible as f32 / p.playable.duration_ms as f32).clamp(0., 1.)
-                } else {
-                    0.
-                };
-                (
-                    format!(
-                        "{} — {}{}",
-                        p.playable.title,
-                        p.playable.artists_display(),
-                        if p.is_playing { "" } else { " ⏸" }
-                    ),
-                    visible,
-                    p.playable.duration_ms,
-                    pct,
-                )
-            }
-            None => ("Nothing playing".to_string(), 0, 0, 0.),
-        };
-
-        div()
-            .id("now-playing")
-            .border_t_1()
-            .border_color(border())
-            .h(px(40.))
-            .relative()
-            .bg(tone(0x232328, 0.75))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(relative(progress))
-                    .bg(Hsla::from(rgb(ACCENT)).opacity(0.55)),
-            )
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(18.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.))
-                            .overflow_hidden()
-                            .child(title_line),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child(if duration_ms > 0 {
-                                format!("{} / {}", clock(position_ms), clock(duration_ms))
-                            } else {
-                                String::new()
-                            }),
-                    )
-                    .when(has_playing_list, |bar| {
-                        bar.child(div().flex_none().child(small_button(
-                            "view-playing-list".into(),
-                            "View list",
-                            true,
-                            cx.listener(|app, _, _, cx| {
-                                app.show_playing_list = true;
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        )))
-                    }),
-            )
-            .cursor_pointer()
-            .on_click(
-                cx.listener(move |app, event: &gpui::ClickEvent, window, _| {
-                    if duration_ms > 0 {
-                        let fraction =
-                            (event.position().x / window.viewport_size().width).clamp(0., 1.);
-                        app.send(Command::Seek((duration_ms as f32 * fraction) as u64));
-                    }
-                }),
-            )
-    }
 }
 
 fn status_row(text: String) -> impl IntoElement {
@@ -1574,6 +1475,9 @@ fn open_player_window(cx: &mut App) {
         },
         |window, cx| {
             let mut rx = runtime.subscribe();
+            let now_playing =
+                cx.new(|_| now_playing::NowPlaying::new(&initial_snapshot, performance.clone()));
+            let now_playing_updates = now_playing.clone();
             let app = cx.new(|cx| {
                 // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
@@ -1587,6 +1491,19 @@ fn open_player_window(cx: &mut App) {
                                     return;
                                 }
                                 app.performance.snapshot(&app.snapshot, &snapshot);
+                                let playback = snapshot.playback.clone();
+                                let audio_ready = matches!(snapshot.audio, AudioState::Ready);
+                                let visible = ready(&snapshot);
+                                let has_playing_list = snapshot.implicit_queue.is_some();
+                                now_playing_updates.update(cx, |now_playing, cx| {
+                                    now_playing.update_snapshot(
+                                        playback,
+                                        audio_ready,
+                                        visible,
+                                        has_playing_list,
+                                        cx,
+                                    );
+                                });
                                 app.snapshot = snapshot;
                                 // First ready snapshot: load the section the
                                 // sidebar opens with, so the second column is
@@ -1613,6 +1530,7 @@ fn open_player_window(cx: &mut App) {
                 PlayerApp {
                     snapshot: initial_snapshot,
                     performance,
+                    now_playing,
                     nav: sidebar::NavSection::LikedSongs,
                     root_focus: cx.focus_handle(),
                     search: TextField::new(cx, "Search Spotify…"),
@@ -1622,7 +1540,23 @@ fn open_player_window(cx: &mut App) {
                     show_playing_list: false,
                     playback_list_projector: RefCell::default(),
                     context_menu: None,
+                    now_playing_subscription: None,
                 }
+            });
+            app.update(cx, |app, cx| {
+                let now_playing = app.now_playing.clone();
+                app.now_playing_subscription = Some(cx.subscribe(
+                    &now_playing,
+                    |app, _, event: &now_playing::NowPlayingEvent, cx| match event {
+                        now_playing::NowPlayingEvent::ViewList => {
+                            app.show_playing_list = true;
+                            cx.notify();
+                        }
+                        now_playing::NowPlayingEvent::Seek(position_ms) => {
+                            app.send(Command::Seek(*position_ms));
+                        }
+                    },
+                ));
             });
             // Shortcuts work from the first frame, before any click.
             let root_focus = app.read(cx).root_focus.clone();
@@ -1746,5 +1680,19 @@ mod tests {
         assert!(!helpers.contains("fn playback_list("));
         assert!(!library.contains("playback_list_for_library"));
         assert!(!library.contains("update_library_playback_list_cache"));
+    }
+
+    #[test]
+    fn animation_request_is_scoped_to_now_playing_entity() {
+        let now_playing = include_str!("now_playing.rs");
+        let frame_call = format!("window.{}{}", "request_", "animation_frame()");
+        for source in [
+            include_str!("main.rs"),
+            include_str!("library.rs"),
+            include_str!("sidebar.rs"),
+        ] {
+            assert!(!source.contains(&frame_call));
+        }
+        assert!(now_playing.contains(&frame_call));
     }
 }

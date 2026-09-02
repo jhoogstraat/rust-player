@@ -267,10 +267,18 @@ pub enum SearchState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaybackStatus {
     pub playable: Playable,
+    /// The Playback Device producing this session's audio.
+    pub device: PlaybackDevice,
     pub is_playing: bool,
     pub position_ms: u64,
     pub observed_at: Instant,
     pub volume_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackDevice {
+    Native,
+    Remote,
 }
 
 /// Playback Health: whether audio can currently be produced. Independent of
