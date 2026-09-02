@@ -14,6 +14,7 @@ mod text_input;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -67,6 +68,80 @@ actions!(
 
 static RUNTIME: OnceLock<Arc<dyn Runtime>> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static PERFORMANCE: OnceLock<Arc<Performance>> = OnceLock::new();
+
+/// Opt-in counters used by the documented performance baseline. Atomics keep
+/// the hot render/subscription paths lock-free; with the flag off the methods
+/// short-circuit and no log is emitted.
+#[derive(Debug)]
+struct Performance {
+    enabled: bool,
+    snapshots: AtomicU64,
+    catalog_changes: AtomicU64,
+    animation_frames: AtomicU64,
+    playback_renders: AtomicU64,
+    render_time_ns: AtomicU64,
+    render_max_ns: AtomicU64,
+}
+
+impl Performance {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("RUST_PLAYER_PERF").is_some_and(|value| value != "0"),
+            snapshots: AtomicU64::new(0),
+            catalog_changes: AtomicU64::new(0),
+            animation_frames: AtomicU64::new(0),
+            playback_renders: AtomicU64::new(0),
+            render_time_ns: AtomicU64::new(0),
+            render_max_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self, previous: &Snapshot, next: &Snapshot) {
+        if !self.enabled {
+            return;
+        }
+        self.snapshots.fetch_add(1, Ordering::Relaxed);
+        if previous.search != next.search
+            || previous.search_detail != next.search_detail
+            || previous.library != next.library
+        {
+            self.catalog_changes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn render(&self, elapsed: std::time::Duration, playing: bool) {
+        if !self.enabled {
+            return;
+        }
+        if playing {
+            self.animation_frames.fetch_add(1, Ordering::Relaxed);
+            self.playback_renders.fetch_add(1, Ordering::Relaxed);
+            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+            self.render_time_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+            self.render_max_ns.fetch_max(elapsed_ns, Ordering::Relaxed);
+        }
+    }
+
+    fn summary(&self) -> String {
+        let renders = self.playback_renders.load(Ordering::Relaxed);
+        let total_ns = self.render_time_ns.load(Ordering::Relaxed);
+        let average_us = if renders == 0 {
+            0
+        } else {
+            total_ns / renders / 1_000
+        };
+        format!(
+            "snapshots={} catalog_changes={} animation_frame_requests={} playback_renders={} render_avg_us={} render_max_us={}",
+            self.snapshots.load(Ordering::Relaxed),
+            self.catalog_changes.load(Ordering::Relaxed),
+            self.animation_frames.load(Ordering::Relaxed),
+            renders,
+            average_us,
+            self.render_max_ns.load(Ordering::Relaxed) / 1_000,
+        )
+    }
+}
 
 fn data_root() -> PathBuf {
     std::env::var_os("RUST_PLAYER_DATA_ROOT")
@@ -82,6 +157,7 @@ fn data_root() -> PathBuf {
 
 struct PlayerApp {
     snapshot: Snapshot,
+    performance: Arc<Performance>,
     /// The active sidebar destination; library sections feed the second
     /// column, Settings swaps the main area.
     nav: sidebar::NavSection,
@@ -573,12 +649,14 @@ fn clock(ms: u64) -> String {
 
 impl Render for PlayerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.snapshot.is_playing() {
+        let playing = self.snapshot.is_playing();
+        let started = self.performance.enabled.then(Instant::now);
+        if playing {
             window.request_animation_frame();
         }
         let snap = &self.snapshot;
 
-        div()
+        let element = div()
             .id("root")
             .key_context("Player")
             .track_focus(&self.root_focus)
@@ -734,7 +812,11 @@ impl Render for PlayerApp {
                             .text_color(rgb(MUTED))
                             .child(log_path_label()),
                     ),
-            )
+            );
+        if let Some(started) = started {
+            self.performance.render(started.elapsed(), playing);
+        }
+        element
     }
 }
 
@@ -1454,6 +1536,10 @@ fn open_player_window(cx: &mut App) {
         .expect("runtime initialized before window opens")
         .clone();
     let initial_snapshot = runtime.subscribe().borrow().clone();
+    let performance = PERFORMANCE
+        .get()
+        .expect("performance initialized before window opens")
+        .clone();
 
     let bounds = Bounds::centered(None, gpui::size(px(960.), px(640.)), cx);
     cx.open_window(
@@ -1500,6 +1586,7 @@ fn open_player_window(cx: &mut App) {
                                 if app.snapshot == snapshot {
                                     return;
                                 }
+                                app.performance.snapshot(&app.snapshot, &snapshot);
                                 app.snapshot = snapshot;
                                 // First ready snapshot: load the section the
                                 // sidebar opens with, so the second column is
@@ -1525,6 +1612,7 @@ fn open_player_window(cx: &mut App) {
 
                 PlayerApp {
                     snapshot: initial_snapshot,
+                    performance,
                     nav: sidebar::NavSection::LikedSongs,
                     root_focus: cx.focus_handle(),
                     search: TextField::new(cx, "Search Spotify…"),
@@ -1553,6 +1641,11 @@ fn main() {
     if let Ok(path) = logging::init(&data_root) {
         let _ = LOG_PATH.set(path);
     }
+    let performance = Arc::new(Performance::new());
+    if performance.enabled {
+        log::info!("[perf] enabled (RUST_PLAYER_PERF=1)");
+    }
+    let _ = PERFORMANCE.set(performance.clone());
 
     let runtime: Arc<dyn Runtime> = if fake {
         Arc::new(FakeRuntime::new())
@@ -1579,9 +1672,19 @@ fn main() {
         // ⌘Q stops playback and flushes state cleanly. A `Subscription`
         // unregisters its hook on drop, and this closure returns before the
         // event loop starts, so the hook must be detached to survive.
-        cx.on_app_quit(move |_cx| async move {
-            if let Some(runtime) = RUNTIME.get() {
-                runtime.shutdown();
+        cx.on_app_quit(move |_cx| {
+            let performance = performance.clone();
+            async move {
+                if let Some(runtime) = RUNTIME.get() {
+                    runtime.shutdown();
+                }
+                if performance.enabled {
+                    log::info!(
+                        "[perf] {} {}",
+                        performance.summary(),
+                        player_spotatui::performance_summary()
+                    );
+                }
             }
         })
         .detach();
@@ -1605,6 +1708,30 @@ mod tests {
         assert!((actual.g - expected.g).abs() < f32::EPSILON);
         assert!((actual.b - expected.b).abs() < f32::EPSILON);
         assert!((actual.a - expected_alpha).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn performance_summary_separates_catalog_and_playback_work() {
+        let metrics = Performance {
+            enabled: true,
+            snapshots: AtomicU64::new(0),
+            catalog_changes: AtomicU64::new(0),
+            animation_frames: AtomicU64::new(0),
+            playback_renders: AtomicU64::new(0),
+            render_time_ns: AtomicU64::new(0),
+            render_max_ns: AtomicU64::new(0),
+        };
+        let before = Snapshot::default();
+        let mut catalog = before.clone();
+        catalog.search = SearchState::Loading {
+            query: "baseline".to_string(),
+        };
+        metrics.snapshot(&before, &catalog);
+        metrics.render(std::time::Duration::from_micros(4), true);
+        assert_eq!(
+            metrics.summary(),
+            "snapshots=1 catalog_changes=1 animation_frame_requests=1 playback_renders=1 render_avg_us=4 render_max_us=4"
+        );
     }
 
     #[test]

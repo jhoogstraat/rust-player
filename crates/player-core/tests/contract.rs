@@ -94,6 +94,18 @@ fn default_snapshot_starts_in_progress_and_starting() {
 }
 
 #[test]
+fn fake_runtime_paused_idle_publishes_no_snapshots() {
+    let runtime = player_core::fake::FakeRuntime::new();
+    let rx = runtime.subscribe();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    assert!(
+        !rx.has_changed().unwrap(),
+        "idle runtime published a snapshot"
+    );
+    runtime.shutdown();
+}
+
+#[test]
 fn fake_runtime_answers_commands_with_snapshots() {
     block_on(async {
         let runtime = player_core::fake::FakeRuntime::new();

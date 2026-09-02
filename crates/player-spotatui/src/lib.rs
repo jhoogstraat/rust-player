@@ -4,6 +4,7 @@
 //! fork actions. The application crate never imports the fork.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -16,6 +17,25 @@ use player_core::{
     Source,
 };
 use spotatui::frontend::{self, EngineAction, LibraryTarget, Onboarding};
+
+static PERFORMANCE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static SNAPSHOT_TRANSLATIONS: AtomicU64 = AtomicU64::new(0);
+static LIBRARY_TRANSLATIONS: AtomicU64 = AtomicU64::new(0);
+
+fn performance_enabled() -> bool {
+    *PERFORMANCE_ENABLED
+        .get_or_init(|| std::env::var_os("RUST_PLAYER_PERF").is_some_and(|value| value != "0"))
+}
+
+/// Translation counters for the opt-in performance baseline. These are
+/// intentionally separate from the GPUI subscriber's catalog-change count.
+pub fn performance_summary() -> String {
+    format!(
+        "adapter_snapshot_translations={} adapter_library_translations={}",
+        SNAPSHOT_TRANSLATIONS.load(Ordering::Relaxed),
+        LIBRARY_TRANSLATIONS.load(Ordering::Relaxed),
+    )
+}
 
 /// Boot inputs for the real runtime.
 #[derive(Debug, Clone)]
@@ -746,6 +766,9 @@ fn library_section(target: LibraryTarget) -> Option<LibrarySection> {
 }
 
 fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibraryState {
+    if performance_enabled() {
+        LIBRARY_TRANSLATIONS.fetch_add(1, Ordering::Relaxed);
+    }
     if fork.notice_is_error
         && let Some(message) = fork
             .notice
@@ -794,6 +817,9 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
 }
 
 fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot {
+    if performance_enabled() {
+        SNAPSHOT_TRANSLATIONS.fetch_add(1, Ordering::Relaxed);
+    }
     // An empty notice is a dismissal in flight (see `dispatch_command`),
     // never a message — and never an error either.
     let notice = fork

@@ -56,6 +56,9 @@ cargo check
 cargo test
 ```
 
+The repeatable GPUI CPU, wakeup, snapshot, catalog, and rendering baseline is
+documented in [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md).
+
 ## Package for macOS
 
 Build an unsigned, self-contained app bundle with PortAudio included:
