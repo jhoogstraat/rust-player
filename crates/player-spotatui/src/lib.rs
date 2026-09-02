@@ -15,7 +15,7 @@ use player_core::{
     SearchArtist, SearchDetail, SearchPlaylist, SearchResults, SearchState, SearchTarget, Snapshot,
     Source,
 };
-use spotatui::frontend::{self, ActionOutcome, EngineAction, LibraryTarget, Onboarding};
+use spotatui::frontend::{self, EngineAction, LibraryTarget, Onboarding};
 
 /// Boot inputs for the real runtime.
 #[derive(Debug, Clone)]
@@ -95,11 +95,6 @@ pub struct SpotatuiPlayer {
     tx: watch::Sender<Snapshot>,
     /// Present once boot succeeded; taken by `shutdown`.
     frontend: Mutex<Option<frontend::Runtime>>,
-    /// Search text is not carried by the fork snapshot, so retain only this
-    /// source intent while translating engine facts.
-    last_query: Arc<Mutex<Option<String>>>,
-    /// The library section selected by the caller; rows remain engine-owned.
-    requested_library: Arc<Mutex<Option<LibrarySection>>>,
     /// The source list that should resume after the explicit queue drains.
     implicit_queue: Arc<Mutex<Option<PlaybackList>>>,
     /// Delivers the manual redirect-URL paste to the blocked boot prompt.
@@ -119,8 +114,6 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
     let player = Arc::new(SpotatuiPlayer {
         tx: tx.clone(),
         frontend: Mutex::new(None),
-        last_query: Arc::default(),
-        requested_library: Arc::default(),
         implicit_queue: Arc::default(),
         paste_url_tx,
         retry_boot_tx,
@@ -192,16 +185,15 @@ impl SpotatuiPlayer {
     fn stage(&self, runtime: frontend::Runtime) {
         let mut rx = runtime.subscribe();
         let relay_tx = self.tx.clone();
-        let last_query = Arc::clone(&self.last_query);
-        let requested_library = Arc::clone(&self.requested_library);
         let implicit_queue = Arc::clone(&self.implicit_queue);
         runtime.handle().spawn(async move {
             loop {
                 let engine_snapshot = rx.borrow_and_update().clone();
-                let query = last_query.lock().unwrap().clone();
-                let section = *requested_library.lock().unwrap();
-                let mut snapshot = map_snapshot(&engine_snapshot, query.as_deref());
-                snapshot.library = section
+                let mut snapshot =
+                    map_snapshot(&engine_snapshot, engine_snapshot.search_query.as_deref());
+                snapshot.library = engine_snapshot
+                    .library_target
+                    .and_then(library_section)
                     .map(|section| map_library(&engine_snapshot, section))
                     .unwrap_or_default();
                 snapshot.implicit_queue = map_implicit_queue(
@@ -243,11 +235,9 @@ impl Runtime for SpotatuiPlayer {
                 );
                 prompt_open && self.paste_url_tx.send(url).is_ok()
             }
-            Command::Search(query) => {
-                *self.last_query.lock().unwrap() = Some(query.clone());
-                self.with_frontend(|runtime| runtime.apply(EngineAction::SearchActiveSource(query)))
-                    .is_some()
-            }
+            Command::Search(query) => self
+                .with_frontend(|runtime| runtime.apply(EngineAction::SearchActiveSource(query)))
+                .is_some(),
             Command::OpenSearchTarget(target) => self
                 .with_frontend(|runtime| {
                     runtime.apply(EngineAction::Open(match target {
@@ -275,53 +265,15 @@ impl Runtime for SpotatuiPlayer {
                     || (matches!(self.login(), LoginState::Expired { .. })
                         && self.retry_boot_tx.send(()).is_ok())
             }
-            Command::Browse(section) => {
-                // The playlist list is fetched during fork startup; liked
-                // songs and recently played are fetched by these actions.
-                let Some(()) = self.with_frontend(|_| ()) else {
-                    return false;
-                };
-                let current = self.tx.borrow().clone();
-                publish(&self.tx, {
-                    *self.requested_library.lock().unwrap() = Some(section);
-                    Snapshot {
-                        library: LibraryState::Loading { section },
-                        ..current
-                    }
-                });
-
-                self.with_frontend(|runtime| match section {
-                    LibrarySection::LikedSongs => {
-                        runtime.apply(EngineAction::OpenLibrary(LibraryTarget::LikedSongs))
-                    }
-                    LibrarySection::RecentlyPlayed => {
-                        runtime.apply(EngineAction::OpenLibrary(LibraryTarget::RecentlyPlayed))
-                    }
-                    // No playlist LibraryTarget exists; startup already
-                    // dispatches GetPlaylists and the snapshot relays it.
-                    LibrarySection::Playlists => ActionOutcome::Applied,
-                });
-
-                // Playlists have no open-library action. Re-read the current
-                // fork snapshot so an already-loaded startup cache is visible
-                // immediately instead of waiting for an unrelated change.
-                if section == LibrarySection::Playlists {
-                    if let Some(engine_snapshot) = self.with_frontend(|runtime| {
-                        let rx = runtime.subscribe();
-                        rx.borrow().clone()
-                    }) {
-                        let current = self.tx.borrow().clone();
-                        publish(
-                            &self.tx,
-                            Snapshot {
-                                library: map_library(&engine_snapshot, section),
-                                ..current
-                            },
-                        );
-                    }
-                }
-                true
-            }
+            Command::Browse(section) => self
+                .with_frontend(|runtime| {
+                    runtime.apply(EngineAction::OpenLibrary(match section {
+                        LibrarySection::Playlists => LibraryTarget::Playlists,
+                        LibrarySection::LikedSongs => LibraryTarget::LikedSongs,
+                        LibrarySection::RecentlyPlayed => LibraryTarget::RecentlyPlayed,
+                    }))
+                })
+                .is_some(),
             Command::Play(playable) => {
                 let Some(()) = self.with_frontend(|_| ()) else {
                     return false;
@@ -586,29 +538,29 @@ mod tests {
 
     #[test]
     fn source_catalog_revisions_cross_the_adapter_unchanged() {
-        let mut fork = idle_with_results();
-        fork.search_revision = 7;
+        let mut engine_snapshot = idle_with_results();
+        engine_snapshot.search_revision = 7;
         let Snapshot {
             search: SearchState::Done { revision, .. },
             ..
-        } = map_snapshot(&fork, Some("coltrane"))
+        } = map_snapshot(&engine_snapshot, Some("coltrane"))
         else {
             panic!("expected completed search");
         };
         assert_eq!(revision, CatalogRevision::new(7));
 
-        fork.detail_revision = 11;
-        fork.search_detail = Some(frontend::SearchDetail::Album {
+        engine_snapshot.detail_revision = 11;
+        engine_snapshot.search_detail = Some(frontend::SearchDetail::Album {
             tracks: vec![track("detail")].into(),
         });
-        let detail = map_snapshot(&fork, None).search_detail.unwrap();
+        let detail = map_snapshot(&engine_snapshot, None).search_detail.unwrap();
         assert!(
             matches!(detail, SearchDetail::Album { revision, .. } if revision == CatalogRevision::new(11))
         );
 
-        fork.library_revision = 13;
-        fork.library.liked_songs = Some(vec![track("liked")].into());
-        let library = map_library(&fork, LibrarySection::LikedSongs);
+        engine_snapshot.library_revision = 13;
+        engine_snapshot.library.liked_songs = Some(vec![track("liked")].into());
+        let library = map_library(&engine_snapshot, LibrarySection::LikedSongs);
         assert!(
             matches!(library, LibraryState::Done { revision, .. } if revision == CatalogRevision::new(13))
         );
@@ -782,6 +734,15 @@ fn library_track_entry(
         playable: playable_from_track(track)?,
         played_at_ms,
     })
+}
+
+fn library_section(target: LibraryTarget) -> Option<LibrarySection> {
+    match target {
+        LibraryTarget::Playlists => Some(LibrarySection::Playlists),
+        LibraryTarget::LikedSongs => Some(LibrarySection::LikedSongs),
+        LibraryTarget::RecentlyPlayed => Some(LibrarySection::RecentlyPlayed),
+        _ => None,
+    }
 }
 
 fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibraryState {
