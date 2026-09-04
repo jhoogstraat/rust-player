@@ -200,7 +200,7 @@ mod tests {
             query: "query".to_string(),
             revision: CatalogRevision::new(revision),
             results: SearchResults {
-                tracks,
+                tracks: tracks.into(),
                 ..SearchResults::default()
             },
         }
@@ -256,7 +256,7 @@ mod tests {
         let mut projector = PlaybackListProjector::default();
         let detail = SearchDetail::Album {
             revision: CatalogRevision::new(1),
-            tracks: vec![track.clone()],
+            tracks: vec![track.clone()].into(),
         };
         let detail_list = projector
             .project_detail(
@@ -278,7 +278,8 @@ mod tests {
             entries: vec![LibraryEntry::Track {
                 playable: track,
                 played_at_ms: None,
-            }],
+            }]
+            .into(),
         };
         let library_list = projector.project_library(&library).unwrap();
         assert_eq!(library_list.source, PlaybackListSource::LikedSongs);
@@ -293,7 +294,8 @@ mod tests {
             entries: vec![LibraryEntry::Track {
                 playable: playable(Source::Spotify, title),
                 played_at_ms: None,
-            }],
+            }]
+            .into(),
         };
 
         let first = projector.project_library(&library("first")).unwrap();

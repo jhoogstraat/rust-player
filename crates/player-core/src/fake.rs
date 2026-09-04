@@ -53,22 +53,25 @@ fn canned_tracks() -> Vec<Playable> {
 
 fn canned_results() -> SearchResults {
     SearchResults {
-        tracks: canned_tracks(),
+        tracks: canned_tracks().into(),
         artists: vec![SearchArtist {
             locator: "spotify:artist:elo".to_string(),
             name: "Electric Light Orchestra".to_string(),
-        }],
+        }]
+        .into(),
         albums: vec![SearchAlbum {
             locator: "spotify:album:outoftheblue".to_string(),
             name: "Out of the Blue".to_string(),
             artists: vec!["Electric Light Orchestra".to_string()],
-        }],
+        }]
+        .into(),
         playlists: vec![SearchPlaylist {
             locator: "spotify:playlist:bluesky".to_string(),
             name: "Blue Sky Mix".to_string(),
             owner: "Rust Player".to_string(),
             track_count: 24,
-        }],
+        }]
+        .into(),
     }
 }
 
@@ -82,7 +85,8 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
         .unwrap_or(0);
     match section {
         LibrarySection::LikedSongs => canned_tracks()
-            .into_iter()
+            .iter()
+            .cloned()
             .chain([
                 canned_track(
                     "Nightdrive",
@@ -105,7 +109,8 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
             })
             .collect(),
         LibrarySection::RecentlyPlayed => canned_tracks()
-            .into_iter()
+            .iter()
+            .cloned()
             .enumerate()
             .map(|(i, playable)| LibraryEntry::Track {
                 played_at_ms: Some(now_ms.saturating_sub((i as u64 + 1) * 3_600_000)),
@@ -246,7 +251,8 @@ fn apply(
         let needle = query.to_lowercase();
         let results: Vec<Playable> = canned_results()
             .tracks
-            .into_iter()
+            .iter()
+            .cloned()
             .filter(|p| {
                 needle.is_empty()
                     || p.title.to_lowercase().contains(&needle)
@@ -257,7 +263,7 @@ fn apply(
             SearchResults::default()
         } else {
             SearchResults {
-                tracks: results,
+                tracks: results.into(),
                 ..canned_results()
             }
         };
@@ -281,7 +287,7 @@ fn apply(
         let done = LibraryState::Done {
             section,
             revision: CatalogRevision::new(next_revision.fetch_add(1, Ordering::Relaxed)),
-            entries: canned_library(section),
+            entries: canned_library(section).into(),
         };
         projector.lock().unwrap().project_library(&done);
         state.lock().unwrap().library = done;

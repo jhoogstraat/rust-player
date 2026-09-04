@@ -465,3 +465,54 @@ fn fake_catalog_refresh_replaces_candidate_but_preserves_active_implicit_list() 
         runtime.shutdown();
     });
 }
+
+#[test]
+fn fake_runtime_reuses_search_and_library_payloads_across_playback_relays() {
+    block_on(async {
+        let runtime = player_core::fake::FakeRuntime::new();
+        let mut rx = runtime.subscribe();
+        runtime.command(Command::Search("blue".to_string()));
+        let done = rx
+            .wait_for(|snap| matches!(snap.search, SearchState::Done { .. }))
+            .await
+            .unwrap();
+        let search_rows = match &done.search {
+            SearchState::Done { results, .. } => Arc::clone(&results.tracks),
+            _ => unreachable!(),
+        };
+        drop(done);
+        runtime.command(Command::Play(playable()));
+        let playback = rx.wait_for(|snap| snap.playback.is_some()).await.unwrap();
+        match &playback.search {
+            SearchState::Done { results, .. } => {
+                assert!(Arc::ptr_eq(&search_rows, &results.tracks));
+            }
+            other => panic!("expected search completion, got {other:?}"),
+        }
+        drop(playback);
+
+        runtime.command(Command::Browse(LibrarySection::LikedSongs));
+        let library = rx
+            .wait_for(|snap| matches!(snap.library, LibraryState::Done { .. }))
+            .await
+            .unwrap();
+        let library_entries = match &library.library {
+            LibraryState::Done { entries, .. } => Arc::clone(entries),
+            _ => unreachable!(),
+        };
+        drop(library);
+        runtime.command(Command::Pause);
+        let paused = rx
+            .wait_for(|snap| snap.playback.as_ref().is_some_and(|p| !p.is_playing))
+            .await
+            .unwrap();
+        match &paused.library {
+            LibraryState::Done { entries, .. } => {
+                assert!(Arc::ptr_eq(&library_entries, entries));
+            }
+            other => panic!("expected library completion, got {other:?}"),
+        }
+        drop(paused);
+        runtime.shutdown();
+    });
+}

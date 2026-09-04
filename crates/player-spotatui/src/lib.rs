@@ -281,15 +281,29 @@ impl SpotatuiPlayer {
         let relay_tx = self.tx.clone();
         let implicit_queue = Arc::clone(&self.implicit_queue);
         runtime.handle().spawn(async move {
+            let mut projections = TranslationCache::default();
             loop {
                 let engine_snapshot = rx.borrow_and_update().clone();
-                let mut snapshot =
-                    map_snapshot(&engine_snapshot, engine_snapshot.search_query.as_deref());
-                snapshot.library = engine_snapshot
+                let mut snapshot = map_snapshot_cached(
+                    &engine_snapshot,
+                    engine_snapshot.search_query.as_deref(),
+                    &mut projections,
+                );
+                let library = engine_snapshot
                     .library_target
                     .and_then(library_section)
-                    .map(|section| map_library(&engine_snapshot, section))
-                    .unwrap_or_default();
+                    .map(|section| {
+                        projections.library(
+                            &engine_snapshot,
+                            section,
+                            CatalogRevision::new(engine_snapshot.library_revision),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        projections.library = None;
+                        LibraryState::default()
+                    });
+                snapshot.library = library;
                 snapshot.implicit_queue = map_implicit_queue(
                     implicit_queue.lock().unwrap().clone(),
                     snapshot.playback.as_ref(),
@@ -429,6 +443,225 @@ fn publish(tx: &watch::Sender<Snapshot>, next: Snapshot) {
             true
         }
     });
+}
+
+/// Revision-keyed source-neutral catalog projections. Only the latest value
+/// for each independent surface is retained; lifecycle states clear it.
+#[derive(Default)]
+struct TranslationCache {
+    search: Option<(CatalogRevision, SearchResults)>,
+    detail: Option<(CatalogRevision, SearchDetail)>,
+    library: Option<(LibrarySection, CatalogRevision, LibraryState)>,
+}
+
+impl TranslationCache {
+    fn library(
+        &mut self,
+        fork: &frontend::Snapshot,
+        section: LibrarySection,
+        revision: CatalogRevision,
+    ) -> LibraryState {
+        let has_data = match section {
+            LibrarySection::LikedSongs => fork.library.liked_songs.is_some(),
+            LibrarySection::RecentlyPlayed => fork.library.recently_played.is_some(),
+            LibrarySection::Playlists => fork.library.playlists.is_some(),
+        };
+        let has_error = fork.notice_is_error
+            && fork
+                .notice
+                .as_deref()
+                .is_some_and(|message| !message.trim().is_empty());
+        if !has_data || has_error {
+            self.library = None;
+            return map_library(fork, section);
+        }
+        if let Some((cached_section, cached_revision, cached)) = &self.library
+            && *cached_section == section
+            && *cached_revision == revision
+        {
+            return cached.clone();
+        }
+        let mapped = map_library(fork, section);
+        self.library = Some((section, revision, mapped.clone()));
+        mapped
+    }
+}
+
+fn map_snapshot_cached(
+    fork: &frontend::Snapshot,
+    last_query: Option<&str>,
+    cache: &mut TranslationCache,
+) -> Snapshot {
+    map_snapshot_inner(fork, last_query, Some(cache))
+}
+
+fn map_search(
+    fork: &frontend::Snapshot,
+    last_query: Option<&str>,
+    error: Option<&str>,
+) -> SearchState {
+    let query = last_query.unwrap_or_default().to_string();
+    if fork.search_loading {
+        SearchState::Loading { query }
+    } else if last_query.is_some() && error.is_none() {
+        SearchState::Done {
+            query,
+            revision: CatalogRevision::new(fork.search_revision),
+            results: map_search_results(fork),
+        }
+    } else if let (Some(query), Some(message)) = (last_query, error) {
+        SearchState::Failed {
+            query: query.to_string(),
+            message: message.to_string(),
+        }
+    } else {
+        SearchState::Idle
+    }
+}
+
+fn map_search_cached(
+    fork: &frontend::Snapshot,
+    last_query: Option<&str>,
+    error: Option<&str>,
+    cache: &mut TranslationCache,
+) -> SearchState {
+    if fork.search_loading || last_query.is_none() || error.is_some() {
+        cache.search = None;
+        return map_search(fork, last_query, error);
+    }
+    let revision = CatalogRevision::new(fork.search_revision);
+    let results = if let Some((cached_revision, results)) = &cache.search
+        && *cached_revision == revision
+    {
+        results.clone()
+    } else {
+        let results = map_search_results(fork);
+        cache.search = Some((revision, results.clone()));
+        results
+    };
+    SearchState::Done {
+        query: last_query.unwrap_or_default().to_string(),
+        revision,
+        results,
+    }
+}
+
+fn map_search_results(fork: &frontend::Snapshot) -> SearchResults {
+    SearchResults {
+        tracks: fork
+            .search_tracks
+            .iter()
+            .filter_map(playable_from_track)
+            .collect::<Vec<_>>()
+            .into(),
+        artists: fork
+            .search_artists
+            .iter()
+            .map(|artist| SearchArtist {
+                locator: artist
+                    .uri
+                    .clone()
+                    .or_else(|| artist.id.clone())
+                    .unwrap_or_default(),
+                name: artist.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        albums: fork
+            .search_albums
+            .iter()
+            .map(|album| SearchAlbum {
+                locator: album
+                    .uri
+                    .clone()
+                    .or_else(|| album.id.clone())
+                    .unwrap_or_default(),
+                name: album.name.clone(),
+                artists: album
+                    .artists
+                    .iter()
+                    .map(|artist| artist.name.clone())
+                    .collect(),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        playlists: fork
+            .search_playlists
+            .iter()
+            .map(|playlist| SearchPlaylist {
+                locator: playlist.uri.clone(),
+                name: playlist.name.clone(),
+                owner: playlist.owner.clone(),
+                track_count: playlist.track_count,
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    }
+}
+
+fn map_detail(fork: &frontend::Snapshot) -> Option<SearchDetail> {
+    fork.search_detail.as_ref().map(|detail| match detail {
+        frontend::SearchDetail::Artist { tracks, albums } => SearchDetail::Artist {
+            revision: CatalogRevision::new(fork.detail_revision),
+            tracks: tracks
+                .iter()
+                .filter_map(playable_from_track)
+                .collect::<Vec<_>>()
+                .into(),
+            albums: albums
+                .iter()
+                .map(|album| SearchAlbum {
+                    locator: album
+                        .uri
+                        .clone()
+                        .or_else(|| album.id.clone())
+                        .unwrap_or_default(),
+                    name: album.name.clone(),
+                    artists: album
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.clone())
+                        .collect(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        },
+        frontend::SearchDetail::Album { tracks } => SearchDetail::Album {
+            revision: CatalogRevision::new(fork.detail_revision),
+            tracks: tracks
+                .iter()
+                .filter_map(playable_from_track)
+                .collect::<Vec<_>>()
+                .into(),
+        },
+        frontend::SearchDetail::Playlist { tracks } => SearchDetail::Playlist {
+            revision: CatalogRevision::new(fork.detail_revision),
+            tracks: tracks
+                .iter()
+                .filter_map(playable_from_track)
+                .collect::<Vec<_>>()
+                .into(),
+        },
+    })
+}
+
+fn map_detail_cached(
+    fork: &frontend::Snapshot,
+    cache: &mut TranslationCache,
+) -> Option<SearchDetail> {
+    let Some(_detail) = fork.search_detail.as_ref() else {
+        cache.detail = None;
+        return None;
+    };
+    let revision = CatalogRevision::new(fork.detail_revision);
+    if let Some((cached_revision, detail)) = &cache.detail
+        && *cached_revision == revision
+    {
+        return Some(detail.clone());
+    }
+    let detail = map_detail(fork).expect("detail was present");
+    cache.detail = Some((revision, detail.clone()));
+    Some(detail)
 }
 
 fn dispatch_command(runtime: &frontend::Runtime, command: Command) -> ActionOutcome {
@@ -713,6 +946,107 @@ mod tests {
     }
 
     #[test]
+    fn source_neutral_catalog_projections_reuse_only_unchanged_revisions() {
+        let mut fork = idle_with_results();
+        fork.search_query = Some("query".to_string());
+        fork.search_revision = 7;
+        let mut cache = TranslationCache::default();
+        let first = map_snapshot_cached(&fork, fork.search_query.as_deref(), &mut cache);
+        let first_rows = match &first.search {
+            SearchState::Done { results, .. } => Arc::clone(&results.tracks),
+            other => panic!("expected done search, got {other:?}"),
+        };
+        fork.position_ms = Some(10);
+        let unchanged = map_snapshot_cached(&fork, fork.search_query.as_deref(), &mut cache);
+        let unchanged_rows = match &unchanged.search {
+            SearchState::Done { results, .. } => Arc::clone(&results.tracks),
+            other => panic!("expected done search, got {other:?}"),
+        };
+        assert!(Arc::ptr_eq(&first_rows, &unchanged_rows));
+
+        fork.search_revision = 8;
+        fork.search_tracks = vec![track("changed")].into();
+        let replaced = map_snapshot_cached(&fork, fork.search_query.as_deref(), &mut cache);
+        let replaced_rows = match &replaced.search {
+            SearchState::Done { results, .. } => Arc::clone(&results.tracks),
+            other => panic!("expected done search, got {other:?}"),
+        };
+        assert!(!Arc::ptr_eq(&first_rows, &replaced_rows));
+    }
+
+    #[test]
+    fn detail_and_library_projections_reuse_only_unchanged_revisions() {
+        let mut fork = idle_with_results();
+        fork.detail_revision = 3;
+        fork.search_detail = Some(frontend::SearchDetail::Album {
+            tracks: vec![track("detail-a")].into(),
+        });
+        let mut cache = TranslationCache::default();
+        let first = map_snapshot_cached(&fork, None, &mut cache);
+        let first_tracks = match first.search_detail.as_ref().unwrap() {
+            SearchDetail::Album { tracks, .. } => Arc::clone(tracks),
+            _ => unreachable!(),
+        };
+        fork.position_ms = Some(1);
+        let reused = map_snapshot_cached(&fork, None, &mut cache);
+        let reused_tracks = match reused.search_detail.as_ref().unwrap() {
+            SearchDetail::Album { tracks, .. } => Arc::clone(tracks),
+            _ => unreachable!(),
+        };
+        assert!(Arc::ptr_eq(&first_tracks, &reused_tracks));
+
+        fork.detail_revision = 4;
+        fork.search_detail = Some(frontend::SearchDetail::Album {
+            tracks: vec![track("detail-b")].into(),
+        });
+        let replaced = map_snapshot_cached(&fork, None, &mut cache);
+        let replaced_tracks = match replaced.search_detail.as_ref().unwrap() {
+            SearchDetail::Album { tracks, .. } => Arc::clone(tracks),
+            _ => unreachable!(),
+        };
+        assert!(!Arc::ptr_eq(&first_tracks, &replaced_tracks));
+
+        fork.library_target = Some(LibraryTarget::LikedSongs);
+        fork.library_revision = 8;
+        fork.library.liked_songs = Some(vec![track("library-a")].into());
+        let _ = map_snapshot_cached(&fork, None, &mut cache);
+        let first_library = cache.library(
+            &fork,
+            LibrarySection::LikedSongs,
+            CatalogRevision::new(fork.library_revision),
+        );
+        let first_entries = match &first_library {
+            LibraryState::Done { entries, .. } => Arc::clone(entries),
+            other => panic!("expected library completion, got {other:?}"),
+        };
+        fork.position_ms = Some(2);
+        let _ = map_snapshot_cached(&fork, None, &mut cache);
+        let reused_library = cache.library(
+            &fork,
+            LibrarySection::LikedSongs,
+            CatalogRevision::new(fork.library_revision),
+        );
+        let reused_entries = match &reused_library {
+            LibraryState::Done { entries, .. } => Arc::clone(entries),
+            other => panic!("expected library completion, got {other:?}"),
+        };
+        assert!(Arc::ptr_eq(&first_entries, &reused_entries));
+        fork.library_revision = 9;
+        fork.library.liked_songs = Some(vec![track("library-b")].into());
+        let _ = map_snapshot_cached(&fork, None, &mut cache);
+        let replaced_library = cache.library(
+            &fork,
+            LibrarySection::LikedSongs,
+            CatalogRevision::new(fork.library_revision),
+        );
+        let replaced_entries = match &replaced_library {
+            LibraryState::Done { entries, .. } => Arc::clone(entries),
+            other => panic!("expected library completion, got {other:?}"),
+        };
+        assert!(!Arc::ptr_eq(&first_entries, &replaced_entries));
+    }
+
+    #[test]
     fn relayed_catalog_failure_keeps_playback_healthy() {
         let fork = frontend::Snapshot {
             notice: Some("offline".to_string()),
@@ -830,7 +1164,7 @@ mod tests {
                 section: LibrarySection::LikedSongs,
                 entries,
                 ..
-            } if matches!(entries.as_slice(), [LibraryEntry::Track { playable, played_at_ms: None }]
+            } if matches!(entries.as_ref(), [LibraryEntry::Track { playable, played_at_ms: None }]
                 if playable.locator == "spotify:track:liked")
         ));
 
@@ -841,7 +1175,7 @@ mod tests {
                 section: LibrarySection::Playlists,
                 entries,
                 ..
-            } if matches!(entries.as_slice(), [LibraryEntry::Playlist { id, name, track_count }]
+            } if matches!(entries.as_ref(), [LibraryEntry::Playlist { id, name, track_count }]
                 if id == "mix" && name == "Mix" && *track_count == 3)
         ));
 
@@ -945,13 +1279,22 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
         Some(entries) => LibraryState::Done {
             section,
             revision: CatalogRevision::new(fork.library_revision),
-            entries,
+            entries: entries.into(),
         },
         None => LibraryState::Loading { section },
     }
 }
 
+#[cfg(test)]
 fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot {
+    map_snapshot_inner(fork, last_query, None)
+}
+
+fn map_snapshot_inner(
+    fork: &frontend::Snapshot,
+    last_query: Option<&str>,
+    mut cache: Option<&mut TranslationCache>,
+) -> Snapshot {
     if performance_enabled() {
         SNAPSHOT_TRANSLATIONS.fetch_add(1, Ordering::Relaxed);
     }
@@ -977,71 +1320,9 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
         }
     };
 
-    let query = last_query.unwrap_or_default().to_string();
-    let search = if fork.search_loading {
-        SearchState::Loading { query }
-    } else if !fork.search_tracks.is_empty()
-        || !fork.search_artists.is_empty()
-        || !fork.search_albums.is_empty()
-        || !fork.search_playlists.is_empty()
-    {
-        SearchState::Done {
-            query,
-            revision: CatalogRevision::new(fork.search_revision),
-            results: SearchResults {
-                tracks: fork
-                    .search_tracks
-                    .iter()
-                    .filter_map(playable_from_track)
-                    .collect(),
-                artists: fork
-                    .search_artists
-                    .iter()
-                    .map(|artist| SearchArtist {
-                        locator: artist
-                            .uri
-                            .clone()
-                            .or_else(|| artist.id.clone())
-                            .unwrap_or_default(),
-                        name: artist.name.clone(),
-                    })
-                    .collect(),
-                albums: fork
-                    .search_albums
-                    .iter()
-                    .map(|album| SearchAlbum {
-                        locator: album
-                            .uri
-                            .clone()
-                            .or_else(|| album.id.clone())
-                            .unwrap_or_default(),
-                        name: album.name.clone(),
-                        artists: album
-                            .artists
-                            .iter()
-                            .map(|artist| artist.name.clone())
-                            .collect(),
-                    })
-                    .collect(),
-                playlists: fork
-                    .search_playlists
-                    .iter()
-                    .map(|playlist| SearchPlaylist {
-                        locator: playlist.uri.clone(),
-                        name: playlist.name.clone(),
-                        owner: playlist.owner.clone(),
-                        track_count: playlist.track_count,
-                    })
-                    .collect(),
-            },
-        }
-    } else if let (Some(query), Some(message)) = (last_query, error) {
-        SearchState::Failed {
-            query: query.to_string(),
-            message: message.to_string(),
-        }
-    } else {
-        SearchState::Idle
+    let search = match cache.as_deref_mut() {
+        Some(cache) => map_search_cached(fork, last_query, error, cache),
+        None => map_search(fork, last_query, error),
     };
 
     let playback = fork.playback.as_ref().and_then(|state| {
@@ -1059,36 +1340,10 @@ fn map_snapshot(fork: &frontend::Snapshot, last_query: Option<&str>) -> Snapshot
         })
     });
 
-    let search_detail = fork.search_detail.as_ref().map(|detail| match detail {
-        frontend::SearchDetail::Artist { tracks, albums } => SearchDetail::Artist {
-            revision: CatalogRevision::new(fork.detail_revision),
-            tracks: tracks.iter().filter_map(playable_from_track).collect(),
-            albums: albums
-                .iter()
-                .map(|album| SearchAlbum {
-                    locator: album
-                        .uri
-                        .clone()
-                        .or_else(|| album.id.clone())
-                        .unwrap_or_default(),
-                    name: album.name.clone(),
-                    artists: album
-                        .artists
-                        .iter()
-                        .map(|artist| artist.name.clone())
-                        .collect(),
-                })
-                .collect(),
-        },
-        frontend::SearchDetail::Album { tracks } => SearchDetail::Album {
-            revision: CatalogRevision::new(fork.detail_revision),
-            tracks: tracks.iter().filter_map(playable_from_track).collect(),
-        },
-        frontend::SearchDetail::Playlist { tracks } => SearchDetail::Playlist {
-            revision: CatalogRevision::new(fork.detail_revision),
-            tracks: tracks.iter().filter_map(playable_from_track).collect(),
-        },
-    });
+    let search_detail = match cache.as_deref_mut() {
+        Some(cache) => map_detail_cached(fork, cache),
+        None => map_detail(fork),
+    };
 
     let queue = fork
         .queue_upcoming

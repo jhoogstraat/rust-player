@@ -84,10 +84,10 @@ pub struct SearchPlaylist {
 /// Catalog results grouped by Spotify content type.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SearchResults {
-    pub tracks: Vec<Playable>,
-    pub artists: Vec<SearchArtist>,
-    pub albums: Vec<SearchAlbum>,
-    pub playlists: Vec<SearchPlaylist>,
+    pub tracks: Arc<[Playable]>,
+    pub artists: Arc<[SearchArtist]>,
+    pub albums: Arc<[SearchAlbum]>,
+    pub playlists: Arc<[SearchPlaylist]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,16 +112,16 @@ pub enum SearchTarget {
 pub enum SearchDetail {
     Artist {
         revision: CatalogRevision,
-        tracks: Vec<Playable>,
-        albums: Vec<SearchAlbum>,
+        tracks: Arc<[Playable]>,
+        albums: Arc<[SearchAlbum]>,
     },
     Album {
         revision: CatalogRevision,
-        tracks: Vec<Playable>,
+        tracks: Arc<[Playable]>,
     },
     Playlist {
         revision: CatalogRevision,
-        tracks: Vec<Playable>,
+        tracks: Arc<[Playable]>,
     },
 }
 
@@ -220,7 +220,7 @@ pub enum LibraryState {
     Done {
         section: LibrarySection,
         revision: CatalogRevision,
-        entries: Vec<LibraryEntry>,
+        entries: Arc<[LibraryEntry]>,
     },
     Failed {
         section: LibrarySection,
