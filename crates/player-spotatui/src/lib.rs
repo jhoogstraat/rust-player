@@ -6,7 +6,7 @@
 //! application crate never imports the fork.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -63,6 +63,7 @@ impl ConnectOptions {
 struct BootOnboarding {
     login_tx: watch::Sender<Snapshot>,
     pasted_url_rx: Mutex<mpsc::Receiver<String>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl BootOnboarding {
@@ -96,10 +97,16 @@ impl Onboarding for BootOnboarding {
         let rx = self.pasted_url_rx.lock().unwrap();
         // Anything pasted before this prompt opened answered nothing.
         while rx.try_recv().is_ok() {}
+        if self.stop.load(Ordering::Acquire) {
+            return Err(anyhow::anyhow!("sign-in cancelled"));
+        }
         self.in_progress(prompt.to_string(), true);
         let url = rx
             .recv()
             .map_err(|_| anyhow::anyhow!("sign-in cancelled"))?;
+        if self.stop.load(Ordering::Acquire) {
+            return Err(anyhow::anyhow!("sign-in cancelled"));
+        }
         self.in_progress("Finishing sign-in…".to_string(), false);
         Ok(format!("{url}\n"))
     }
@@ -117,14 +124,48 @@ pub struct SpotatuiPlayer {
     tx: watch::Sender<Snapshot>,
     /// Serializes command dispatch with implicit-list metadata updates.
     command_lock: Mutex<()>,
-    /// Present once boot succeeded; taken by `shutdown`.
-    frontend: Mutex<Option<frontend::Runtime>>,
+    /// Present once boot succeeded; taken by `shutdown`. The terminal bit
+    /// closes the hand-off race where shutdown wins before boot stages a
+    /// runtime.
+    frontend: Mutex<FrontendSlot<frontend::Runtime>>,
     /// The source list that should resume after the explicit queue drains.
     implicit_queue: Arc<Mutex<Option<PlaybackList>>>,
     /// Delivers the manual redirect-URL paste to the blocked boot prompt.
     paste_url_tx: mpsc::Sender<String>,
     /// Wakes the boot thread for another attempt after a failed boot.
     retry_boot_tx: mpsc::Sender<()>,
+    /// Cancels a failed boot's retry wait and any blocking onboarding prompt.
+    stop_boot: Arc<AtomicBool>,
+}
+
+struct FrontendSlot<T> {
+    runtime: Option<T>,
+    shutting_down: bool,
+}
+
+impl<T> Default for FrontendSlot<T> {
+    fn default() -> Self {
+        Self {
+            runtime: None,
+            shutting_down: false,
+        }
+    }
+}
+
+impl<T> FrontendSlot<T> {
+    fn stage(&mut self, runtime: T) -> Result<(), T> {
+        if self.shutting_down {
+            Err(runtime)
+        } else {
+            self.runtime = Some(runtime);
+            Ok(())
+        }
+    }
+
+    fn begin_shutdown(&mut self) -> Option<T> {
+        self.shutting_down = true;
+        self.runtime.take()
+    }
 }
 
 /// Connect to the real runtime. Returns immediately; sign-in progress flows
@@ -135,23 +176,34 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
     let (tx, _rx) = watch::channel(Snapshot::default());
     let (paste_url_tx, paste_url_rx) = mpsc::channel::<String>();
     let (retry_boot_tx, retry_boot_rx) = mpsc::channel::<()>();
+    let stop_boot = Arc::new(AtomicBool::new(false));
     let player = Arc::new(SpotatuiPlayer {
         tx: tx.clone(),
         command_lock: Mutex::new(()),
-        frontend: Mutex::new(None),
+        frontend: Mutex::new(FrontendSlot::default()),
         implicit_queue: Arc::default(),
         paste_url_tx,
         retry_boot_tx,
+        stop_boot: Arc::clone(&stop_boot),
     });
 
     let onboarding: Arc<dyn Onboarding> = Arc::new(BootOnboarding {
         login_tx: tx,
         pasted_url_rx: Mutex::new(paste_url_rx),
+        stop: Arc::clone(&stop_boot),
     });
     let player_for_boot = Arc::downgrade(&player);
     std::thread::Builder::new()
         .name("player-boot".into())
-        .spawn(move || boot_loop(player_for_boot, options, onboarding, retry_boot_rx))
+        .spawn(move || {
+            boot_loop(
+                player_for_boot,
+                options,
+                onboarding,
+                retry_boot_rx,
+                stop_boot,
+            )
+        })
         .expect("spawn boot thread");
 
     player
@@ -163,9 +215,13 @@ fn boot_loop(
     options: ConnectOptions,
     onboarding: Arc<dyn Onboarding>,
     retry_rx: mpsc::Receiver<()>,
+    stop: Arc<AtomicBool>,
 ) {
     frontend::Runtime::install_panic_hook();
     loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         let Some(player) = player.upgrade() else {
             return;
         };
@@ -180,6 +236,9 @@ fn boot_loop(
                 return;
             }
             Err(error) => {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
                 log::error!("[boot] runtime boot failed: {error:#}");
                 publish(
                     &player.tx,
@@ -196,12 +255,22 @@ fn boot_loop(
             }
         }
         drop(player);
-        if retry_rx.recv().is_err() {
+        if !wait_for_retry(&retry_rx, &stop) {
             return;
         }
         // Clicks queued while this attempt ran asked for the same thing.
         while retry_rx.try_recv().is_ok() {}
     }
+}
+
+fn wait_for_retry(retry_rx: &mpsc::Receiver<()>, stop: &AtomicBool) -> bool {
+    if stop.load(Ordering::Acquire) {
+        return false;
+    }
+    retry_rx
+        .recv()
+        .map(|()| !stop.load(Ordering::Acquire))
+        .unwrap_or(false)
 }
 
 impl SpotatuiPlayer {
@@ -231,11 +300,16 @@ impl SpotatuiPlayer {
                 }
             }
         });
-        *self.frontend.lock().unwrap() = Some(runtime);
+        let rejected = self.frontend.lock().unwrap().stage(runtime);
+        if let Err(runtime) = rejected {
+            if let Err(error) = runtime.shutdown() {
+                log::warn!("[shutdown] late runtime shutdown failed: {error:#}");
+            }
+        }
     }
 
     fn with_frontend<T>(&self, f: impl FnOnce(&frontend::Runtime) -> T) -> Option<T> {
-        self.frontend.lock().unwrap().as_ref().map(f)
+        self.frontend.lock().unwrap().runtime.as_ref().map(f)
     }
 
     fn login(&self) -> LoginState {
@@ -288,7 +362,8 @@ impl Runtime for SpotatuiPlayer {
                     self.with_frontend(|runtime| runtime.apply(EngineAction::BeginSpotifyLogin))
                 {
                     Some(map_outcome(outcome))
-                } else if matches!(self.login(), LoginState::Expired { .. })
+                } else if !self.stop_boot.load(Ordering::Acquire)
+                    && matches!(self.login(), LoginState::Expired { .. })
                     && self.retry_boot_tx.send(()).is_ok()
                 {
                     // Before a successful boot the retry is a channel handoff;
@@ -333,7 +408,10 @@ impl Runtime for SpotatuiPlayer {
     }
 
     fn shutdown(&self) {
-        let Some(runtime) = self.frontend.lock().unwrap().take() else {
+        self.stop_boot.store(true, Ordering::Release);
+        let _ = self.retry_boot_tx.send(());
+        let _ = self.paste_url_tx.send(String::new());
+        let Some(runtime) = self.frontend.lock().unwrap().begin_shutdown() else {
             return;
         };
         if let Err(error) = runtime.shutdown() {
@@ -496,6 +574,31 @@ mod tests {
             map_outcome(frontend::ActionOutcome::Queued { accepted: 3 }),
             ActionOutcome::Queued { accepted: 3 }
         );
+    }
+
+    #[test]
+    fn shutdown_wins_boot_stage_and_rejects_late_runtime() {
+        // This is the exact interleaving that used to leak a booted Runtime:
+        // shutdown observes an empty slot, then the blocking boot thread
+        // completes. The terminal slot state makes that late hand-off fail.
+        let slot = Mutex::new(FrontendSlot::<u8>::default());
+        assert_eq!(slot.lock().unwrap().begin_shutdown(), None);
+        assert_eq!(slot.lock().unwrap().stage(7), Err(7));
+    }
+
+    #[test]
+    fn preboot_shutdown_cancels_retry_wait_and_onboarding_prompt() {
+        let stop = Arc::new(AtomicBool::new(true));
+        let (_paste_tx, paste_rx) = mpsc::channel();
+        let (login_tx, _login_rx) = watch::channel(Snapshot::default());
+        let onboarding = BootOnboarding {
+            login_tx,
+            pasted_url_rx: Mutex::new(paste_rx),
+            stop: Arc::clone(&stop),
+        };
+        let (_retry_tx, retry_rx) = mpsc::channel();
+        assert!(!wait_for_retry(&retry_rx, &stop));
+        assert!(onboarding.prompt_line("redirect").is_err());
     }
 
     #[test]
