@@ -86,3 +86,7 @@ fresh `--fake` data root, CPU settled to 0.0% in the post-startup samples after
 The authenticated active-playback and paused-engine acceptance runs remain
 unavailable without a Spotify account, so no active CPU or wakeup improvement
 is claimed. The measured changes are retained and the task sequence is closed.
+
+The final `cargo test --workspace --locked --offline` pass completed with 6
+`player-core` unit tests, 15 contract tests, 18 adapter tests, and 18 player
+tests passing.
