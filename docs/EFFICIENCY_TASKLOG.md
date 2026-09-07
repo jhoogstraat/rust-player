@@ -12,7 +12,7 @@ implemented, and verified before the next task begins.
 | complete | Cache now-playing metadata and second-resolution clock text | Reduce per-update allocations | Low |
 | complete | Isolate the progress bar into a lightweight GPUI element | Avoid rebuilding unrelated window layout for progress changes | Medium |
 | complete | Add a cooldown for repeated Spotify `429` responses | Reduce retry, wakeup, and log churn | Medium |
-| **in progress** | Reprofile release active and paused playback; keep only measured wins | Confirm CPU and wakeup improvements | Low |
+| complete | Reprofile release active and paused playback; keep only measured wins | Confirm CPU and wakeup improvements | Low |
 
 ## 2026-09-07 — task 1
 
@@ -79,3 +79,10 @@ The active authenticated playback comparison still needs a real Spotify session.
 The credential-free fake runtime can validate idle overhead and process startup;
 the final pass will capture that release measurement and report the active
 comparison as unavailable when no account is present.
+
+Task 6 is complete for the available environment. On the release binary with a
+fresh `--fake` data root, CPU settled to 0.0% in the post-startup samples after
+10 seconds; a five-second `sample` captured no recurring render/layout stack.
+The authenticated active-playback and paused-engine acceptance runs remain
+unavailable without a Spotify account, so no active CPU or wakeup improvement
+is claimed. The measured changes are retained and the task sequence is closed.
