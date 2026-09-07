@@ -9,14 +9,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    ClickEvent, Context, EventEmitter, Hsla, IntoElement, ParentElement, Styled, Task, Window, div,
-    prelude::*, px, relative, rgb,
+    div, prelude::*, px, relative, rgb, ClickEvent, Context, EventEmitter, Hsla, IntoElement,
+    ParentElement, SharedString, Styled, Task, Window,
 };
 use player_core::{AudioState, PlaybackDevice, PlaybackStatus, Snapshot};
 
-use crate::{ACCENT, MUTED, Performance, border, clock, small_button, tone};
+use crate::{border, clock, small_button, tone, Performance, ACCENT, MUTED};
 
-const PROGRESS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const FOCUSED_PROGRESS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const BACKGROUND_PROGRESS_UPDATE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 pub(crate) enum NowPlayingEvent {
     ViewList,
@@ -37,6 +39,11 @@ pub(crate) struct NowPlaying {
     has_playing_list: bool,
     performance: Arc<Performance>,
     progress_task: Task<()>,
+    window_active: bool,
+    title_line: SharedString,
+    duration_ms: u64,
+    clock_second: Option<u64>,
+    clock_label: SharedString,
 }
 
 impl NowPlaying {
@@ -45,13 +52,20 @@ impl NowPlaying {
         performance: Arc<Performance>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let playback = snapshot.playback.clone();
+        let (title_line, duration_ms) = playback_metadata(playback.as_ref());
         let mut now_playing = Self {
-            playback: snapshot.playback.clone(),
+            playback,
             audio_ready: matches!(snapshot.audio, AudioState::Ready),
             visible: matches!(snapshot.login, player_core::LoginState::Ready),
             has_playing_list: snapshot.implicit_queue.is_some(),
             performance,
             progress_task: Task::ready(()),
+            window_active: true,
+            title_line,
+            duration_ms,
+            clock_second: None,
+            clock_label: SharedString::default(),
         };
         if now_playing.active() {
             now_playing.start_progress_updates(cx);
@@ -75,7 +89,13 @@ impl NowPlaying {
             return;
         }
         let was_active = self.active();
+        let playback_changed = self.playback != playback;
         self.playback = playback;
+        if playback_changed {
+            (self.title_line, self.duration_ms) = playback_metadata(self.playback.as_ref());
+            self.clock_second = None;
+            self.clock_label = SharedString::default();
+        }
         self.audio_ready = audio_ready;
         self.visible = visible;
         self.has_playing_list = has_playing_list;
@@ -89,23 +109,26 @@ impl NowPlaying {
     }
 
     fn start_progress_updates(&mut self, cx: &mut Context<Self>) {
-        self.progress_task = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(PROGRESS_UPDATE_INTERVAL)
-                    .await;
-                let Ok(active) = this.update(cx, |now_playing, cx| {
-                    let active = now_playing.active();
-                    if active {
-                        cx.notify();
-                    }
-                    active
-                }) else {
-                    break;
-                };
-                if !active {
-                    break;
+        self.progress_task = cx.spawn(async move |this, cx| loop {
+            let Ok(Some(interval)) = this.update(cx, |now_playing, _| {
+                now_playing
+                    .active()
+                    .then(|| progress_update_interval(now_playing.window_active))
+            }) else {
+                break;
+            };
+            cx.background_executor().timer(interval).await;
+            let Ok(active) = this.update(cx, |now_playing, cx| {
+                let active = now_playing.active();
+                if active {
+                    cx.notify();
                 }
+                active
+            }) else {
+                break;
+            };
+            if !active {
+                break;
             }
         });
     }
@@ -120,6 +143,21 @@ impl NowPlaying {
     }
 }
 
+fn playback_metadata(playback: Option<&PlaybackStatus>) -> (SharedString, u64) {
+    match playback {
+        Some(playback) => (
+            SharedString::from(format!(
+                "{} — {}{}",
+                playback.playable.title,
+                playback.playable.artists_display(),
+                if playback.is_playing { "" } else { " ⏸" }
+            )),
+            playback.playable.duration_ms,
+        ),
+        None => (SharedString::new_static("Nothing playing"), 0),
+    }
+}
+
 /// Progress updates belong to the mounted now-playing presentation only while
 /// the engine reports ready Native Playback and the session is actively playing.
 fn should_animate(
@@ -131,33 +169,47 @@ fn should_animate(
     visible && audio_ready && device == Some(PlaybackDevice::Native) && playing
 }
 
+fn progress_update_interval(window_active: bool) -> std::time::Duration {
+    if window_active {
+        FOCUSED_PROGRESS_UPDATE_INTERVAL
+    } else {
+        BACKGROUND_PROGRESS_UPDATE_INTERVAL
+    }
+}
+
 impl gpui::Render for NowPlaying {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_active = window.is_window_active();
         let active = self.active();
         let started = self.performance.enabled.then(Instant::now);
 
-        let (title_line, position_ms, duration_ms, progress) = match &self.playback {
+        let position_ms = match &self.playback {
             Some(p) => {
                 let visible = player_core::project_position(p, Instant::now());
-                let pct = if p.playable.duration_ms > 0 {
-                    (visible as f32 / p.playable.duration_ms as f32).clamp(0., 1.)
-                } else {
-                    0.
-                };
-                (
-                    format!(
-                        "{} — {}{}",
-                        p.playable.title,
-                        p.playable.artists_display(),
-                        if p.is_playing { "" } else { " ⏸" }
-                    ),
-                    visible,
-                    p.playable.duration_ms,
-                    pct,
-                )
+                visible
             }
-            None => ("Nothing playing".to_string(), 0, 0, 0.),
+            None => 0,
         };
+        let duration_ms = self.duration_ms;
+        let progress = if duration_ms > 0 {
+            (position_ms as f32 / duration_ms as f32).clamp(0., 1.)
+        } else {
+            0.
+        };
+        let clock_label = if duration_ms > 0 {
+            let second = position_ms / 1000;
+            if self.clock_second != Some(second) {
+                self.clock_second = Some(second);
+                self.clock_label =
+                    SharedString::from(format!("{} / {}", clock(position_ms), clock(duration_ms)));
+            }
+            self.clock_label.clone()
+        } else {
+            self.clock_second = None;
+            self.clock_label = SharedString::default();
+            SharedString::default()
+        };
+        let title_line = self.title_line.clone();
 
         let has_playing_list = self.has_playing_list;
         let element = div()
@@ -196,11 +248,7 @@ impl gpui::Render for NowPlaying {
                             .flex_none()
                             .text_size(px(11.))
                             .text_color(rgb(MUTED))
-                            .child(if duration_ms > 0 {
-                                format!("{} / {}", clock(position_ms), clock(duration_ms))
-                            } else {
-                                String::new()
-                            }),
+                            .child(clock_label),
                     )
                     .when(has_playing_list, |bar| {
                         bar.child(div().flex_none().child(small_button(
@@ -234,7 +282,7 @@ impl gpui::Render for NowPlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::should_animate;
+    use super::{progress_update_interval, should_animate};
     use player_core::PlaybackDevice;
 
     #[test]
@@ -269,5 +317,17 @@ mod tests {
             Some(PlaybackDevice::Remote),
             true
         ));
+    }
+
+    #[test]
+    fn background_progress_updates_are_slower() {
+        assert_eq!(
+            progress_update_interval(true),
+            std::time::Duration::from_millis(100)
+        );
+        assert_eq!(
+            progress_update_interval(false),
+            std::time::Duration::from_millis(500)
+        );
     }
 }
