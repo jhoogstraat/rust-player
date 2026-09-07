@@ -111,18 +111,56 @@ pub enum SearchTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchDetail {
     Artist {
+        target_locator: Option<String>,
+        complete: bool,
         revision: CatalogRevision,
         tracks: Arc<[Playable]>,
         albums: Arc<[SearchAlbum]>,
     },
     Album {
+        target_locator: Option<String>,
+        complete: bool,
         revision: CatalogRevision,
         tracks: Arc<[Playable]>,
     },
     Playlist {
+        target_locator: Option<String>,
+        complete: bool,
         revision: CatalogRevision,
         tracks: Arc<[Playable]>,
     },
+}
+
+impl SearchDetail {
+    /// Match the loaded result to a target using adapter-canonicalized locators.
+    pub fn matches_target(&self, target: &SearchTarget) -> bool {
+        let (locator, detail_locator) = match (target, self) {
+            (
+                SearchTarget::Artist { locator, .. },
+                SearchDetail::Artist { target_locator, .. },
+            ) => (locator, target_locator),
+            (
+                SearchTarget::Album { locator, .. },
+                SearchDetail::Album { target_locator, .. },
+            ) => (locator, target_locator),
+            (
+                SearchTarget::Playlist { locator, .. },
+                SearchDetail::Playlist { target_locator, .. },
+            ) => (locator, target_locator),
+            _ => return false,
+        };
+        detail_locator.as_deref().is_some_and(|detail_locator| {
+            locator == detail_locator
+        })
+    }
+
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Self::Artist { complete, .. }
+            | Self::Album { complete, .. }
+            | Self::Playlist { complete, .. } => *complete,
+        }
+    }
 }
 
 /// The user-visible source of the currently implicit playback list.

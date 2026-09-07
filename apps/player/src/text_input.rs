@@ -9,6 +9,17 @@ use gpui::{
 
 const MUTED: u32 = 0x8b8b91;
 
+fn is_command_chord(stroke: &gpui::Keystroke) -> bool {
+    stroke.modifiers.platform
+        || stroke.modifiers.control
+        || stroke.modifiers.function
+        || (stroke.modifiers.alt
+            && !stroke
+                .key_char
+                .as_deref()
+                .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control)))
+}
+
 /// What one keystroke did to a field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyOutcome {
@@ -97,11 +108,7 @@ impl TextField {
     pub fn key(&mut self, event: &KeyDownEvent) -> KeyOutcome {
         let stroke = &event.keystroke;
         // Command chords never edit text.
-        if stroke.modifiers.platform
-            || stroke.modifiers.control
-            || stroke.modifiers.alt
-            || stroke.modifiers.function
-        {
+        if is_command_chord(stroke) {
             return KeyOutcome::Ignored;
         }
         match stroke.key.as_str() {
@@ -164,5 +171,29 @@ impl TextField {
         window: &gpui::Window,
     ) -> impl IntoElement + use<> {
         self.render(id, window)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_characters_are_text_but_command_chords_are_not() {
+        let mut stroke = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            key: "s".into(),
+            key_char: Some("ß".into()),
+        };
+        assert!(!is_command_chord(&stroke));
+        stroke.modifiers.platform = true;
+        assert!(is_command_chord(&stroke));
+        stroke.modifiers.platform = false;
+        stroke.key_char = None;
+        stroke.key = "left".into();
+        assert!(is_command_chord(&stroke));
     }
 }

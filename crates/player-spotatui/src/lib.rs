@@ -466,12 +466,7 @@ impl TranslationCache {
             LibrarySection::RecentlyPlayed => fork.library.recently_played.is_some(),
             LibrarySection::Playlists => fork.library.playlists.is_some(),
         };
-        let has_error = fork.notice_is_error
-            && fork
-                .notice
-                .as_deref()
-                .is_some_and(|message| !message.trim().is_empty());
-        if !has_data || has_error {
+        if !has_data {
             self.library = None;
             return map_library(fork, section);
         }
@@ -503,7 +498,7 @@ fn map_search(
     let query = last_query.unwrap_or_default().to_string();
     if fork.search_loading {
         SearchState::Loading { query }
-    } else if last_query.is_some() && error.is_none() {
+    } else if last_query.is_some() && (error.is_none() || search_data_available(fork)) {
         SearchState::Done {
             query,
             revision: CatalogRevision::new(fork.search_revision),
@@ -525,7 +520,11 @@ fn map_search_cached(
     error: Option<&str>,
     cache: &mut TranslationCache,
 ) -> SearchState {
-    if fork.search_loading || last_query.is_none() || error.is_some() {
+    if fork.search_loading || last_query.is_none() {
+        cache.search = None;
+        return map_search(fork, last_query, error);
+    }
+    if error.is_some() && !search_data_available(fork) {
         cache.search = None;
         return map_search(fork, last_query, error);
     }
@@ -562,6 +561,7 @@ fn map_search_results(fork: &frontend::Snapshot) -> SearchResults {
                     .uri
                     .clone()
                     .or_else(|| artist.id.clone())
+                    .map(|locator| spotify_locator("artist", &locator))
                     .unwrap_or_default(),
                 name: artist.name.clone(),
             })
@@ -575,6 +575,7 @@ fn map_search_results(fork: &frontend::Snapshot) -> SearchResults {
                     .uri
                     .clone()
                     .or_else(|| album.id.clone())
+                    .map(|locator| spotify_locator("album", &locator))
                     .unwrap_or_default(),
                 name: album.name.clone(),
                 artists: album
@@ -589,7 +590,7 @@ fn map_search_results(fork: &frontend::Snapshot) -> SearchResults {
             .search_playlists
             .iter()
             .map(|playlist| SearchPlaylist {
-                locator: playlist.uri.clone(),
+                locator: spotify_locator("playlist", &playlist.uri),
                 name: playlist.name.clone(),
                 owner: playlist.owner.clone(),
                 track_count: playlist.track_count,
@@ -599,9 +600,26 @@ fn map_search_results(fork: &frontend::Snapshot) -> SearchResults {
     }
 }
 
+fn spotify_locator(kind: &str, locator: &str) -> String {
+    if locator.starts_with("spotify:") {
+        locator.to_string()
+    } else {
+        format!("spotify:{kind}:{locator}")
+    }
+}
+
 fn map_detail(fork: &frontend::Snapshot) -> Option<SearchDetail> {
     fork.search_detail.as_ref().map(|detail| match detail {
-        frontend::SearchDetail::Artist { tracks, albums } => SearchDetail::Artist {
+        frontend::SearchDetail::Artist {
+            target_locator,
+            complete,
+            tracks,
+            albums,
+        } => SearchDetail::Artist {
+            target_locator: target_locator
+                .as_deref()
+                .map(|locator| spotify_locator("artist", locator)),
+            complete: *complete,
             revision: CatalogRevision::new(fork.detail_revision),
             tracks: tracks
                 .iter()
@@ -615,6 +633,7 @@ fn map_detail(fork: &frontend::Snapshot) -> Option<SearchDetail> {
                         .uri
                         .clone()
                         .or_else(|| album.id.clone())
+                        .map(|locator| spotify_locator("album", &locator))
                         .unwrap_or_default(),
                     name: album.name.clone(),
                     artists: album
@@ -626,7 +645,15 @@ fn map_detail(fork: &frontend::Snapshot) -> Option<SearchDetail> {
                 .collect::<Vec<_>>()
                 .into(),
         },
-        frontend::SearchDetail::Album { tracks } => SearchDetail::Album {
+        frontend::SearchDetail::Album {
+            target_locator,
+            complete,
+            tracks,
+        } => SearchDetail::Album {
+            target_locator: target_locator
+                .as_deref()
+                .map(|locator| spotify_locator("album", locator)),
+            complete: *complete,
             revision: CatalogRevision::new(fork.detail_revision),
             tracks: tracks
                 .iter()
@@ -634,7 +661,15 @@ fn map_detail(fork: &frontend::Snapshot) -> Option<SearchDetail> {
                 .collect::<Vec<_>>()
                 .into(),
         },
-        frontend::SearchDetail::Playlist { tracks } => SearchDetail::Playlist {
+        frontend::SearchDetail::Playlist {
+            target_locator,
+            complete,
+            tracks,
+        } => SearchDetail::Playlist {
+            target_locator: target_locator
+                .as_deref()
+                .map(|locator| spotify_locator("playlist", locator)),
+            complete: *complete,
             revision: CatalogRevision::new(fork.detail_revision),
             tracks: tracks
                 .iter()
@@ -702,11 +737,7 @@ fn action_for_command(command: Command) -> EngineAction {
         Command::RemoveQueued(index) => EngineAction::RemoveNativeQueued(index),
         Command::MoveQueued { index, up } => EngineAction::MoveNativeQueued { index, up },
         Command::ClearQueue => EngineAction::ClearNativeQueue,
-        // The fork has no dedicated dismiss. An error notice blocks plain
-        // notifications, so overwrite it as an *error* with an empty message
-        // and the minimum TTL: `map_snapshot` drops empty notices at once and
-        // the fork expires it on its next tick.
-        Command::DismissNotice => EngineAction::NotifyError(String::new(), 0),
+        Command::DismissNotice => EngineAction::DismissNotice,
         Command::Search(_)
         | Command::OpenSearchTarget(_)
         | Command::SubmitPastedLoginUrl(_)
@@ -806,6 +837,14 @@ mod tests {
         assert_eq!(
             map_outcome(frontend::ActionOutcome::Queued { accepted: 3 }),
             ActionOutcome::Queued { accepted: 3 }
+        );
+    }
+
+    #[test]
+    fn dismiss_notice_uses_the_engine_dismissal_action() {
+        assert_eq!(
+            action_for_command(Command::DismissNotice),
+            EngineAction::DismissNotice
         );
     }
 
@@ -930,6 +969,8 @@ mod tests {
 
         engine_snapshot.detail_revision = 11;
         engine_snapshot.search_detail = Some(frontend::SearchDetail::Album {
+            target_locator: Some("spotify:album:detail".to_string()),
+            complete: true,
             tracks: vec![track("detail")].into(),
         });
         let detail = map_snapshot(&engine_snapshot, None).search_detail.unwrap();
@@ -943,6 +984,25 @@ mod tests {
         assert!(
             matches!(library, LibraryState::Done { revision, .. } if revision == CatalogRevision::new(13))
         );
+    }
+
+    #[test]
+    fn detail_mapping_preserves_actual_identity_and_completeness() {
+        let mut fork = frontend::Snapshot::default();
+        fork.search_detail = Some(frontend::SearchDetail::Album {
+            target_locator: Some("spotify:album:actual".to_string()),
+            complete: false,
+            tracks: vec![track("partial")].into(),
+        });
+        let detail = map_snapshot(&fork, None).search_detail.unwrap();
+        assert!(matches!(
+            detail,
+            SearchDetail::Album {
+                target_locator: Some(locator),
+                complete: false,
+                ..
+            } if locator == "spotify:album:actual"
+        ));
     }
 
     #[test]
@@ -979,6 +1039,8 @@ mod tests {
         let mut fork = idle_with_results();
         fork.detail_revision = 3;
         fork.search_detail = Some(frontend::SearchDetail::Album {
+            target_locator: Some("spotify:album:detail".to_string()),
+            complete: true,
             tracks: vec![track("detail-a")].into(),
         });
         let mut cache = TranslationCache::default();
@@ -997,6 +1059,8 @@ mod tests {
 
         fork.detail_revision = 4;
         fork.search_detail = Some(frontend::SearchDetail::Album {
+            target_locator: Some("spotify:album:detail".to_string()),
+            complete: true,
             tracks: vec![track("detail-b")].into(),
         });
         let replaced = map_snapshot_cached(&fork, None, &mut cache);
@@ -1134,6 +1198,83 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_error_keeps_loaded_search_results() {
+        let mut fork = idle_with_results();
+        fork.search_query = Some("query".to_string());
+        fork.notice = Some("playback failed".to_string());
+        fork.notice_is_error = true;
+
+        assert!(matches!(
+            map_snapshot(&fork, Some("query")).search,
+            SearchState::Done { .. }
+        ));
+    }
+
+    #[test]
+    fn empty_search_survives_unrelated_error_but_failed_retry_does_not() {
+        let mut fork = frontend::Snapshot {
+            search_query: Some("empty".into()),
+            search_has_results_page: true,
+            notice: Some("playback failed".into()),
+            notice_is_error: true,
+            ..Default::default()
+        };
+        let mut cache = TranslationCache::default();
+        assert!(matches!(
+            map_snapshot_cached(&fork, Some("empty"), &mut cache).search,
+            SearchState::Done { results, .. } if results.tracks.is_empty()
+        ));
+        fork.search_loading = true;
+        fork.search_has_results_page = false;
+        assert!(matches!(
+            map_snapshot_cached(&fork, Some("retry"), &mut cache).search,
+            SearchState::Loading { .. }
+        ));
+        fork.search_loading = false;
+        fork.notice = Some("catalog unavailable".into());
+        assert!(matches!(
+            map_snapshot_cached(&fork, Some("retry"), &mut cache).search,
+            SearchState::Failed { message, .. } if message == "catalog unavailable"
+        ));
+    }
+
+    #[test]
+    fn search_error_without_results_is_visible() {
+        let fork = frontend::Snapshot {
+            search_query: Some("query".to_string()),
+            notice: Some("catalog unavailable".to_string()),
+            notice_is_error: true,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            map_snapshot(&fork, Some("query")).search,
+            SearchState::Failed { message, .. } if message == "catalog unavailable"
+        ));
+    }
+
+    #[test]
+    fn failed_new_search_does_not_reuse_previous_revision() {
+        let mut completed = idle_with_results();
+        completed.search_revision = 1;
+        assert!(matches!(
+            map_snapshot(&completed, Some("first")).search,
+            SearchState::Done { .. }
+        ));
+
+        let failed = frontend::Snapshot {
+            search_revision: completed.search_revision,
+            notice: Some("catalog unavailable".to_string()),
+            notice_is_error: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            map_snapshot(&failed, Some("second")).search,
+            SearchState::Failed { query, .. } if query == "second"
+        ));
+    }
+
+    #[test]
     fn maps_fork_library_rows_and_keeps_unfetched_sections_loading() {
         let fork = frontend::Snapshot {
             library: frontend::LibrarySnapshot {
@@ -1201,6 +1342,57 @@ mod tests {
             LibraryState::Failed { section: LibrarySection::RecentlyPlayed, message }
                 if message == "offline"
         ));
+
+        let loaded_with_error = frontend::Snapshot {
+            library_target: Some(LibraryTarget::RecentlyPlayed),
+            library: frontend::LibrarySnapshot {
+                recently_played: Some(vec![track("recent")].into()),
+                ..Default::default()
+            },
+            notice: Some("playback failed".to_string()),
+            notice_is_error: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            map_library(&loaded_with_error, LibrarySection::RecentlyPlayed),
+            LibraryState::Done { .. }
+        ));
+
+        let mut cache = TranslationCache::default();
+        assert!(matches!(
+            cache.library(
+                &loaded_with_error,
+                LibrarySection::RecentlyPlayed,
+                CatalogRevision::new(loaded_with_error.library_revision),
+            ),
+            LibraryState::Done { .. }
+        ));
+        let cleared = frontend::Snapshot {
+            library_target: Some(LibraryTarget::RecentlyPlayed),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cache.library(
+                &cleared,
+                LibrarySection::RecentlyPlayed,
+                CatalogRevision::new(cleared.library_revision),
+            ),
+            LibraryState::Loading {
+                section: LibrarySection::RecentlyPlayed
+            }
+        ));
+
+        assert!(matches!(
+            map_library(
+                &frontend::Snapshot {
+                    notice: Some("catalog unavailable".to_string()),
+                    notice_is_error: true,
+                    ..Default::default()
+                },
+                LibrarySection::RecentlyPlayed
+            ),
+            LibraryState::Failed { message, .. } if message == "catalog unavailable"
+        ));
     }
 }
 
@@ -1238,7 +1430,13 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
     if performance_enabled() {
         LIBRARY_TRANSLATIONS.fetch_add(1, Ordering::Relaxed);
     }
-    if fork.notice_is_error
+    let has_data = match section {
+        LibrarySection::LikedSongs => fork.library.liked_songs.is_some(),
+        LibrarySection::RecentlyPlayed => fork.library.recently_played.is_some(),
+        LibrarySection::Playlists => fork.library.playlists.is_some(),
+    };
+    if !has_data
+        && fork.notice_is_error
         && let Some(message) = fork
             .notice
             .as_deref()
@@ -1283,6 +1481,14 @@ fn map_library(fork: &frontend::Snapshot, section: LibrarySection) -> LibrarySta
         },
         None => LibraryState::Loading { section },
     }
+}
+
+fn search_data_available(fork: &frontend::Snapshot) -> bool {
+    fork.search_has_results_page
+        || !fork.search_tracks.is_empty()
+        || !fork.search_artists.is_empty()
+        || !fork.search_albums.is_empty()
+        || !fork.search_playlists.is_empty()
 }
 
 #[cfg(test)]

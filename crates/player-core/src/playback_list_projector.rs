@@ -50,6 +50,12 @@ impl PlaybackListProjector {
         let Some(detail) = detail else {
             return self.clear();
         };
+        if !detail.matches_target(target) {
+            return self.clear();
+        }
+        if !detail.is_complete() {
+            return self.clear();
+        }
         let (source, revision, tracks) = match (target, detail) {
             (
                 SearchTarget::Artist { locator, name },
@@ -64,7 +70,7 @@ impl PlaybackListProjector {
                 *revision,
                 tracks,
             ),
-            (SearchTarget::Album { locator, name }, SearchDetail::Album { revision, tracks }) => (
+            (SearchTarget::Album { locator, name }, SearchDetail::Album { revision, tracks, .. }) => (
                 PlaybackListSource::Album {
                     locator: locator.clone(),
                     name: name.clone(),
@@ -74,7 +80,7 @@ impl PlaybackListProjector {
             ),
             (
                 SearchTarget::Playlist { locator, name, .. },
-                SearchDetail::Playlist { revision, tracks },
+                SearchDetail::Playlist { revision, tracks, .. },
             ) => (
                 PlaybackListSource::Playlist {
                     locator: locator.clone(),
@@ -255,6 +261,8 @@ mod tests {
         let track = playable(Source::Spotify, "one");
         let mut projector = PlaybackListProjector::default();
         let detail = SearchDetail::Album {
+            target_locator: Some("spotify:album:one".to_string()),
+            complete: true,
             revision: CatalogRevision::new(1),
             tracks: vec![track.clone()].into(),
         };
@@ -283,6 +291,31 @@ mod tests {
         };
         let library_list = projector.project_library(&library).unwrap();
         assert_eq!(library_list.source, PlaybackListSource::LikedSongs);
+    }
+
+    #[test]
+    fn detail_identity_and_completeness_gate_playback_projection() {
+        let track = playable(Source::Spotify, "one");
+        let target = SearchTarget::Album {
+            locator: "spotify:album:b".to_string(),
+            name: "B".to_string(),
+        };
+        let mut projector = PlaybackListProjector::default();
+        let stale = SearchDetail::Album {
+            target_locator: Some("spotify:album:a".to_string()),
+            complete: true,
+            revision: CatalogRevision::new(1),
+            tracks: vec![track.clone()].into(),
+        };
+        assert!(projector.project_detail(&target, Some(&stale)).is_none());
+
+        let partial = SearchDetail::Album {
+            target_locator: Some("spotify:album:b".to_string()),
+            complete: false,
+            revision: CatalogRevision::new(2),
+            tracks: vec![track].into(),
+        };
+        assert!(projector.project_detail(&target, Some(&partial)).is_none());
     }
 
     #[test]
