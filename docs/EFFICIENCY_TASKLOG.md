@@ -11,8 +11,8 @@ implemented, and verified before the next task begins.
 | complete | Make progress cadence adaptive to window focus | Reduce redraw work while the window is in the background | Low |
 | complete | Cache now-playing metadata and second-resolution clock text | Reduce per-update allocations | Low |
 | complete | Isolate the progress bar into a lightweight GPUI element | Avoid rebuilding unrelated window layout for progress changes | Medium |
-| **in progress** | Add a cooldown for repeated Spotify `429` responses | Reduce retry, wakeup, and log churn | Medium |
-| pending | Reprofile release active and paused playback; keep only measured wins | Confirm CPU and wakeup improvements | Low |
+| complete | Add a cooldown for repeated Spotify `429` responses | Reduce retry, wakeup, and log churn | Medium |
+| **in progress** | Reprofile release active and paused playback; keep only measured wins | Confirm CPU and wakeup improvements | Low |
 
 ## 2026-09-07 — task 1
 
@@ -65,3 +65,17 @@ The pinned engine already honors `Retry-After` for an individual 429, but the
 next playback poll can immediately begin another retry sequence. The next
 change will add a short poll cooldown after a rate-limit response, preserving
 the last playback state while avoiding repeated request and log churn.
+
+Task 5 is complete. The engine now emits a rate-limit fact after the playback
+request helper exhausts its retries; the fold keeps the last context visible,
+clears the in-flight marker, and delays the next poll by 10 seconds. The engine
+test, 18 player tests, and locked offline release build passed. The workspace is
+pinned to engine revision `28a2570c`. Task 6 will reprofile the release binary
+and compare the available fake/idle measurements with the earlier baseline.
+
+## 2026-09-07 — task 6 started
+
+The active authenticated playback comparison still needs a real Spotify session.
+The credential-free fake runtime can validate idle overhead and process startup;
+the final pass will capture that release measurement and report the active
+comparison as unavailable when no account is present.
