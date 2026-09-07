@@ -68,9 +68,10 @@ the last playback state while avoiding repeated request and log churn.
 
 Task 5 is complete. The engine now emits a rate-limit fact after the playback
 request helper exhausts its retries; the fold keeps the last context visible,
-clears the in-flight marker, and delays the next poll by 10 seconds. The engine
-test, 18 player tests, and locked offline release build passed. The workspace is
-pinned to engine revision `28a2570c`. Task 6 will reprofile the release binary
+clears the in-flight marker, and delays the next poll using `Retry-After` (with
+a 10-second fallback). The engine test, 18 player tests, and locked offline
+release build passed. The workspace is pinned to engine revision `28a2570c`.
+Task 6 will reprofile the release binary
 and compare the available fake/idle measurements with the earlier baseline.
 
 ## 2026-09-07 — task 6 started
@@ -90,3 +91,11 @@ is claimed. The measured changes are retained and the task sequence is closed.
 The final `cargo test --workspace --locked --offline` pass completed with 6
 `player-core` unit tests, 15 contract tests, 18 adapter tests, and 18 player
 tests passing.
+
+## 2026-09-07 — rate-limit follow-up
+
+The engine now carries the parsed numeric `Retry-After` value through a typed
+rate-limit error when the final 429 escapes the shared request helper. Playback
+polls use that delay instead of always waiting the fallback; the fallback still
+covers older string-only errors. The focused engine tests pass, and the next
+workspace pin is `91f03631`.
