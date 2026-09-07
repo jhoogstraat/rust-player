@@ -9,12 +9,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    ClickEvent, Context, EventEmitter, Hsla, IntoElement, ParentElement, Styled, Window, div,
+    ClickEvent, Context, EventEmitter, Hsla, IntoElement, ParentElement, Styled, Task, Window, div,
     prelude::*, px, relative, rgb,
 };
 use player_core::{AudioState, PlaybackDevice, PlaybackStatus, Snapshot};
 
 use crate::{ACCENT, MUTED, Performance, border, clock, small_button, tone};
+
+const PROGRESS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub(crate) enum NowPlayingEvent {
     ViewList,
@@ -34,17 +36,27 @@ pub(crate) struct NowPlaying {
     visible: bool,
     has_playing_list: bool,
     performance: Arc<Performance>,
+    progress_task: Task<()>,
 }
 
 impl NowPlaying {
-    pub(crate) fn new(snapshot: &Snapshot, performance: Arc<Performance>) -> Self {
-        Self {
+    pub(crate) fn new(
+        snapshot: &Snapshot,
+        performance: Arc<Performance>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut now_playing = Self {
             playback: snapshot.playback.clone(),
             audio_ready: matches!(snapshot.audio, AudioState::Ready),
             visible: matches!(snapshot.login, player_core::LoginState::Ready),
             has_playing_list: snapshot.implicit_queue.is_some(),
             performance,
+            progress_task: Task::ready(()),
+        };
+        if now_playing.active() {
+            now_playing.start_progress_updates(cx);
         }
+        now_playing
     }
 
     pub(crate) fn update_snapshot(
@@ -62,11 +74,40 @@ impl NowPlaying {
         {
             return;
         }
+        let was_active = self.active();
         self.playback = playback;
         self.audio_ready = audio_ready;
         self.visible = visible;
         self.has_playing_list = has_playing_list;
+        let active = self.active();
+        if active && !was_active {
+            self.start_progress_updates(cx);
+        } else if !active && was_active {
+            self.progress_task = Task::ready(());
+        }
         cx.notify();
+    }
+
+    fn start_progress_updates(&mut self, cx: &mut Context<Self>) {
+        self.progress_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(PROGRESS_UPDATE_INTERVAL)
+                    .await;
+                let Ok(active) = this.update(cx, |now_playing, cx| {
+                    let active = now_playing.active();
+                    if active {
+                        cx.notify();
+                    }
+                    active
+                }) else {
+                    break;
+                };
+                if !active {
+                    break;
+                }
+            }
+        });
     }
 
     fn active(&self) -> bool {
@@ -79,8 +120,8 @@ impl NowPlaying {
     }
 }
 
-/// Animation belongs to the mounted now-playing presentation only while the
-/// engine reports ready Native Playback and the session is actively playing.
+/// Progress updates belong to the mounted now-playing presentation only while
+/// the engine reports ready Native Playback and the session is actively playing.
 fn should_animate(
     visible: bool,
     audio_ready: bool,
@@ -91,15 +132,9 @@ fn should_animate(
 }
 
 impl gpui::Render for NowPlaying {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active();
         let started = self.performance.enabled.then(Instant::now);
-        if active {
-            // This call is intentionally scoped to this entity. GPUI notifies
-            // only the entity that requested the next frame, leaving the root,
-            // catalog, sidebar, and queue presentation event-driven.
-            window.request_animation_frame();
-        }
 
         let (title_line, position_ms, duration_ms, progress) = match &self.playback {
             Some(p) => {

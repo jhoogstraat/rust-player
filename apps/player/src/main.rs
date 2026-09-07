@@ -80,7 +80,7 @@ struct Performance {
     enabled: bool,
     snapshots: AtomicU64,
     catalog_changes: AtomicU64,
-    animation_frames: AtomicU64,
+    progress_updates: AtomicU64,
     playback_renders: AtomicU64,
     render_time_ns: AtomicU64,
     render_max_ns: AtomicU64,
@@ -92,7 +92,7 @@ impl Performance {
             enabled: std::env::var_os("RUST_PLAYER_PERF").is_some_and(|value| value != "0"),
             snapshots: AtomicU64::new(0),
             catalog_changes: AtomicU64::new(0),
-            animation_frames: AtomicU64::new(0),
+            progress_updates: AtomicU64::new(0),
             playback_renders: AtomicU64::new(0),
             render_time_ns: AtomicU64::new(0),
             render_max_ns: AtomicU64::new(0),
@@ -117,7 +117,7 @@ impl Performance {
             return;
         }
         if playing {
-            self.animation_frames.fetch_add(1, Ordering::Relaxed);
+            self.progress_updates.fetch_add(1, Ordering::Relaxed);
             self.playback_renders.fetch_add(1, Ordering::Relaxed);
             let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
             self.render_time_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
@@ -134,10 +134,10 @@ impl Performance {
             total_ns / renders / 1_000
         };
         format!(
-            "snapshots={} catalog_changes={} animation_frame_requests={} playback_renders={} render_avg_us={} render_max_us={}",
+            "snapshots={} catalog_changes={} progress_updates={} playback_renders={} render_avg_us={} render_max_us={}",
             self.snapshots.load(Ordering::Relaxed),
             self.catalog_changes.load(Ordering::Relaxed),
-            self.animation_frames.load(Ordering::Relaxed),
+            self.progress_updates.load(Ordering::Relaxed),
             renders,
             average_us,
             self.render_max_ns.load(Ordering::Relaxed) / 1_000,
@@ -1609,8 +1609,8 @@ fn open_player_window(cx: &mut App) {
         },
         |window, cx| {
             let mut rx = runtime.subscribe();
-            let now_playing =
-                cx.new(|_| now_playing::NowPlaying::new(&initial_snapshot, performance.clone()));
+            let now_playing = cx
+                .new(|cx| now_playing::NowPlaying::new(&initial_snapshot, performance.clone(), cx));
             let now_playing_updates = now_playing.clone();
             let app = cx.new(|cx| {
                 // Fold published snapshots into the entity.
@@ -1790,7 +1790,7 @@ mod tests {
             enabled: true,
             snapshots: AtomicU64::new(0),
             catalog_changes: AtomicU64::new(0),
-            animation_frames: AtomicU64::new(0),
+            progress_updates: AtomicU64::new(0),
             playback_renders: AtomicU64::new(0),
             render_time_ns: AtomicU64::new(0),
             render_max_ns: AtomicU64::new(0),
@@ -1804,7 +1804,7 @@ mod tests {
         metrics.render(std::time::Duration::from_micros(4), true);
         assert_eq!(
             metrics.summary(),
-            "snapshots=1 catalog_changes=1 animation_frame_requests=1 playback_renders=1 render_avg_us=4 render_max_us=4"
+            "snapshots=1 catalog_changes=1 progress_updates=1 playback_renders=1 render_avg_us=4 render_max_us=4"
         );
     }
 
@@ -1823,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn animation_request_is_scoped_to_now_playing_entity() {
+    fn playback_progress_updates_are_scoped_to_now_playing_entity() {
         let now_playing = include_str!("now_playing.rs");
         let frame_call = format!("window.{}{}", "request_", "animation_frame()");
         for source in [
@@ -1833,6 +1833,8 @@ mod tests {
         ] {
             assert!(!source.contains(&frame_call));
         }
-        assert!(now_playing.contains(&frame_call));
+        assert!(!now_playing.contains(&frame_call));
+        assert!(now_playing.contains("PROGRESS_UPDATE_INTERVAL"));
+        assert!(now_playing.contains("start_progress_updates"));
     }
 }
