@@ -106,7 +106,8 @@ Source is a separate version-two milestone.
 - The adapter lives in this repository, not in the fork, so the fork never depends on this product's types. The adapter maps `player-core` commands to `Action` variants and composes `player-core` snapshots from the fork's snapshot. It contains no playback logic.
 - The fork's `Runtime` owns every task the terminal runner used to own: the IoEvent pump (`runtime/pump.rs`), the deferred native streaming startup and recovery (`runtime/startup.rs`), and a Tokio tick loop that calls `Driver::tick` every 250 ms (`core::user_config::DEFAULT_TICK_RATE_MILLISECONDS`). The tick loop keeps running while the window is closed; it is where OAuth tokens refresh and playback advances.
 - Concretely, `runtime/startup.rs::launch_ui` is split at its `runner::start_ui` call: everything before it becomes service startup shared by both frontends, and the terminal runner's tick and quit sequence (`driver.dispatch_startup`, `driver.tick`, `driver.on_quit`, session persistence, `close_io_channel`) becomes the `frontend` tick loop and `shutdown`. `bootstrap::boot` takes an options struct instead of clap matches.
-- The application builds the fork with `default-features = false, features = ["streaming"]`. Every other default feature is off on purpose: `tui`, `telemetry`, `scripting`, `discord-rpc`, `mpris`, `macos-media`, `windows-media`, `audio-viz-cpal`, and above all `self-update`, which would silently replace the running binary on launch (`runtime/bootstrap.rs`, top of `boot`).
+- Native Playback is published to macOS Now Playing through the fork's existing `macos-media` feature. The runtime owns this integration so it remains active when the final window is closed; macOS controls enqueue transport actions into the Playback Engine Event Spine and never mutate GPUI state directly.
+- The application builds the fork with `default-features = false, features = ["streaming", "macos-media"]`. Every other default feature is off on purpose: `tui`, `telemetry`, `scripting`, `discord-rpc`, `mpris`, `windows-media`, `audio-viz-cpal`, and above all `self-update`, which would silently replace the running binary on launch (`runtime/bootstrap.rs`, top of `boot`). The macOS-only `macos-media` feature publishes Native Playback to the system Now Playing interface and routes external transport controls through the Playback Engine.
 - The runtime is embedded in the GPUI process. There is no daemon, local RPC server, secondary viewport, or headless mode.
 - Production consumes the private fork through a Git dependency pinned to an exact revision. A documented local path override is allowed during coordinated development. The fork is neither vendored nor a submodule.
 
@@ -242,7 +243,20 @@ Acceptance gate: every control is keyboard operable; closing and reopening the
 window preserves playback; Quit stops playback and leaves state readable on the
 next launch.
 
-### Milestone 7 — Self-contained bundle
+### Milestone 7 — macOS Now Playing integration
+
+Enable the fork's `macos-media` feature and verify the existing MediaPlayer
+adapter with GPUI. Confirm that Now Playing metadata follows Native Playback,
+play/pause/previous/next commands follow the same Queue and Implicit Playback
+List rules as the window, and the integration survives window close. If the
+fork's AppKit run-loop ownership conflicts with GPUI, make that adapter
+host-safe in the fork before adding any application-level integration.
+
+Acceptance gate: a real macOS session appears in the menu-bar/Control Center
+Now Playing surface; its transport controls affect audible playback; metadata
+clears on stop and quit; `cargo check`, `cargo test`, and the packaged app pass.
+
+### Milestone 8 — Self-contained bundle
 
 Build the unsigned `.app`, bundle PortAudio, rewrite dynamic references, copy
 notices, and document the real-account smoke test.
@@ -251,7 +265,7 @@ Acceptance gate: the bundle launches and produces audio on a clean macOS user
 account without Homebrew PortAudio in its runtime path; formatting, clippy,
 tests, dynamic-library inspection, and the manual smoke test pass.
 
-### Milestone 8 — Experimental YouTube Source, version two
+### Milestone 9 — Experimental YouTube Source, version two
 
 Advertise Spotatui's existing YouTube engine as a second `Source` variant,
 map `Action::SelectSource` and `SearchActiveSource`, exercise mixed-source
@@ -268,6 +282,7 @@ dependency enters version one.
 - The fake runtime drives UI-state tests: sign-in prompts, search transitions, offline catalog, audio unavailable, expired session, skipped Queue item, and shutdown. Rendering is compile-checked, not pixel-tested.
 - CI never contains Spotify credentials and never claims to verify audible output.
 - One documented manual macOS smoke test with a Premium account verifies both consents, audible playback, transport, Queue operations, relaunch, close and reopen, Quit, and the final bundle.
+- The macOS smoke test also verifies menu-bar/Control Center Now Playing metadata, media-key transport, previous/next Queue behavior, window-independent control, and clearing on quit.
 - Keep the suite minimal: one test per contract consequence, reusing Spotatui's coverage rather than duplicating it.
 
 ## Out of Scope
@@ -280,7 +295,7 @@ dependency enters version one.
 - Spotify library browsing, playlists, playlist editing, likes, recommendations, recently played, friends, listening parties, lyrics, and cover art.
 - Queue persistence, shuffle, repeat modes, and save-Queue-as-playlist.
 - Explicit audio-output selection and automatic output-device following.
-- Customizable shortcuts and OS media-key or now-playing integration, even though the fork's `macos-media` feature exists; it depends on the frontend pumping `NSRunLoop` and is unverified under GPUI.
+- Customizable shortcuts beyond the fixed application bindings.
 - Extracting Comet modules, floating popovers, backdrop blur, and any fork-only GPUI API.
 - Plugins, Lua scripting, AI DJ, MCP control, telemetry, Discord presence.
 - Offline catalog, downloads, and offline playback.

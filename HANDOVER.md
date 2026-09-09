@@ -93,10 +93,56 @@ User requested restoring the app build after interrupting the prior run. The cur
 - Rows use a fixed 60px height with clipping/truncation; headings, navigation, album context menus, playback indices and enqueue actions retained.
 - App tests passed: 17, including new section-boundary/empty-category indexing regression. `git diff --check` passed. Parent reviewed layout/indexing; GUI smoke remains pending.
 - Checksum comparison confirmed all tracked files in original app and engine worktrees unchanged. Nothing merged or published.
-- Remaining priorities: catalog/transport separation, authoritative occurrence-aware playback cursor, broader pagination, full IME, GUI/CPU verification. Empty-search preservation and eager search/artist rendering are now addressed in isolated worktrees.
+- Remaining priorities: catalog/transport separation, broader pagination, full IME, GUI/CPU verification, and the larger failed-start lifecycle for implicit playback. Empty-search preservation and eager search/artist rendering are now addressed in isolated worktrees.
 
 ## Merged tested changes — 2026-09-08
 - Merged from isolated worktrees into the main working tree: lazy search/category and artist-detail rows, fixed row clipping/truncation, empty-search page presence in the engine snapshot, and adapter preservation of successful empty searches during unrelated errors.
 - `cargo build --locked --offline --workspace`: PASS.
 - `cargo test --locked --offline --workspace --quiet`: PASS (6 core, 15 contract, 18 adapter, 17 app tests; existing warnings only).
-- Larger engine-owned occurrence cursor and catalog/transport lane split remain intentionally unmerged.
+- The larger catalog/transport lane split remains intentionally unmerged.
+
+## Crash investigation — 2026-09-08
+- User reported that the app crashes after Spotify re-authentication. No matching
+  DiagnosticReport or crash/abort entry was present in the available local logs;
+  the timing points at the newly enabled `macos-media` startup path.
+- The engine's macOS adapter previously created `NSApplication`, MediaPlayer
+  objects, and artwork `NSImage` values on a detached worker thread. The engine
+  worktree now queues remote-command registration, Now Playing updates, and
+  artwork construction on `DispatchQueue::main`; artwork bytes are fetched off
+  the main thread. Its worker has an explicit shutdown channel and is joined on
+  manager drop, preventing stale detached media workers during quit/retry.
+- Added the engine's direct `dispatch2` dependency and a regression test proving
+  the media worker is joined. The macOS-targeted engine check passed, and
+  `cargo test --locked --offline --target aarch64-apple-darwin --features
+  streaming,macos-media infra::macos_media -- --nocapture` passed 1 test.
+- The main app still points at the published Git revision `91f0363`; the engine
+  fix is uncommitted in `/Users/U765382/Developer/Private/spotatui-player-performance`
+  and has not been published or pinned. A coordinated-development patch is now
+  present in `.cargo/config.toml`, so locked app builds exercise that local fix;
+  remove it after publishing the engine revision. Root workspace tests pass in
+  both host and `aarch64-apple-darwin` targets: 6 core, 15 contract, 18 adapter,
+  and 18 app tests. The engine macOS-targeted test passes. No commits, pushes,
+  packaging, or GUI smoke verification performed.
+
+## Follow-up boundary review — 2026-09-08
+- Catalog/transport lane splitting remains deferred. `Network` owns the live
+  Spotify session, PKCE state, pacing, caches, and native recovery; cloning it
+  would permit stale authentication and reorder fold acknowledgements. The
+  existing service lane is the only safe concurrent lane until a shared,
+  generation-aware Spotify session handle exists.
+- Full selection/IME/native text input remains deferred. GPUI requires an
+  entity-backed `EntityInputHandler` with UTF-16 selection and marked-text
+  ranges, shaping geometry, and per-frame `Window::handle_input`; the current
+  cursor-only field cannot safely grow that behavior as a small patch.
+- These are deliberate scope boundaries, not unverified failures. Focused
+  engine/app tests passed during both investigations; no files were changed.
+- The occurrence-aware Implicit Playback List seam is now integrated in the
+  dirty engine/app worktrees. The engine owns the ordered metadata and cursor;
+  Playback/TrackChanged/paused facts reconcile it in order, explicit Queue
+  ownership blocks cursor movement, and the adapter projects it without
+  identity-based reconstruction. The adapter caches the source-neutral mapping
+  by engine-list allocation, so position snapshots do not rebuild every row.
+- A generation-aware pending-start/typed-failure rollback remains deferred:
+  accepted list starts are the current commit point, while a later start error
+  still follows the engine's existing error path. It should be added only with
+  request identity so unrelated playback errors cannot clear a valid list.

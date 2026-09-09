@@ -18,10 +18,11 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use gpui::{
     Anchor, AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled, Task,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, anchored, deferred,
     div, hsla, prelude::*, px, rgb, uniform_list,
 };
@@ -174,6 +175,12 @@ struct PlayerApp {
     show_playing_list: bool,
     playback_list_projector: RefCell<PlaybackListProjector>,
     context_menu: Option<ContextMenu>,
+    /// Local intent shown immediately while the runtime starts or changes a
+    /// track. The runtime snapshot remains authoritative for actual playback.
+    pending_playable: Option<Playable>,
+    pending_transport: Option<SharedString>,
+    pending_generation: u64,
+    pending_timeout: Task<()>,
     now_playing_subscription: Option<gpui::Subscription>,
 }
 
@@ -196,6 +203,81 @@ impl PlayerApp {
             .get()
             .expect("command dispatcher initialized before window opens")
             .send(command);
+    }
+
+    fn begin_playback(&mut self, playable: Playable, command: Command, cx: &mut Context<Self>) {
+        self.set_pending_playback(Some(playable), None, cx);
+        self.send(command);
+    }
+
+    fn begin_transport(&mut self, command: Command, label: &'static str, cx: &mut Context<Self>) {
+        self.set_pending_playback(None, Some(SharedString::new_static(label)), cx);
+        self.send(command);
+    }
+
+    fn set_pending_playback(
+        &mut self,
+        pending_playable: Option<Playable>,
+        pending_transport: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_generation = self.pending_generation.wrapping_add(1);
+        let generation = self.pending_generation;
+        self.pending_playable = pending_playable;
+        self.pending_transport = pending_transport;
+        self.update_pending_display(cx);
+
+        self.pending_timeout = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(15))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.pending_generation == generation {
+                    app.pending_generation = app.pending_generation.wrapping_add(1);
+                    app.pending_playable = None;
+                    app.pending_transport = None;
+                    app.update_pending_display(cx);
+                    cx.notify();
+                }
+            });
+        });
+        cx.notify();
+    }
+
+    fn update_pending_display(&mut self, cx: &mut Context<Self>) {
+        self.now_playing.update(cx, |now_playing, cx| {
+            now_playing.update_pending(
+                self.pending_playable.clone(),
+                self.pending_transport.clone(),
+                cx,
+            );
+        });
+    }
+
+    fn playback_pending_resolved(
+        &self,
+        previous: &Option<player_core::PlaybackStatus>,
+        next: &Option<player_core::PlaybackStatus>,
+    ) -> bool {
+        let playable_matches = self.pending_playable.as_ref().is_some_and(|pending| {
+            next.as_ref()
+                .is_some_and(|playback| playback.playable.locator == pending.locator)
+        });
+        let track_changed = previous
+            .as_ref()
+            .map(|playback| playback.playable.locator.as_str())
+            != next
+                .as_ref()
+                .map(|playback| playback.playable.locator.as_str());
+        playable_matches || (self.pending_transport.is_some() && track_changed)
+    }
+
+    fn clear_pending_playback(&mut self, cx: &mut Context<Self>) {
+        self.pending_generation = self.pending_generation.wrapping_add(1);
+        self.pending_playable = None;
+        self.pending_transport = None;
+        self.update_pending_display(cx);
+        cx.notify();
     }
 
     fn open_search_target(&mut self, target: SearchTarget, cx: &mut Context<Self>) {
@@ -471,13 +553,14 @@ impl PlayerApp {
                         index: *index,
                     },
                 );
+                let pending_playable = playable.clone();
                 let enqueue = playable.clone();
                 card = card
                     .child(Self::context_menu_item(
                         "context-play-track",
                         "Play",
                         cx.listener(move |app, _, _, cx| {
-                            app.send(play_command.clone());
+                            app.begin_playback(pending_playable.clone(), play_command.clone(), cx);
                             app.close_context_menu(cx);
                         }),
                     ))
@@ -627,8 +710,8 @@ impl PlayerApp {
             } else {
                 Command::Resume
             }),
-            "n" => self.send(Command::Next),
-            "p" => self.send(Command::Previous),
+            "n" => self.begin_transport(Command::Next, "Changing track…", cx),
+            "p" => self.begin_transport(Command::Previous, "Changing track…", cx),
             "+" | "=" => self.send(volume_command(&self.snapshot, 10)),
             "-" => self.send(volume_command(&self.snapshot, -10)),
             "/" => {
@@ -673,8 +756,12 @@ impl Render for PlayerApp {
                 window.focus(&app.search.focus, cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|app, _: &NextTrack, _, _| app.send(Command::Next)))
-            .on_action(cx.listener(|app, _: &PreviousTrack, _, _| app.send(Command::Previous)))
+            .on_action(cx.listener(|app, _: &NextTrack, _, cx| {
+                app.begin_transport(Command::Next, "Changing track…", cx);
+            }))
+            .on_action(cx.listener(|app, _: &PreviousTrack, _, cx| {
+                app.begin_transport(Command::Previous, "Changing track…", cx);
+            }))
             .on_action(cx.listener(|app, _: &VolumeUp, _, _| {
                 app.send(volume_command(&app.snapshot, 10));
             }))
@@ -795,12 +882,16 @@ impl Render for PlayerApp {
                     .child(button(
                         "prev",
                         "⏮",
-                        cx.listener(|app, _, _, _| app.send(Command::Previous)),
+                        cx.listener(|app, _, _, cx| {
+                            app.begin_transport(Command::Previous, "Changing track…", cx);
+                        }),
                     ))
                     .child(button(
                         "next",
                         "⏭",
-                        cx.listener(|app, _, _, _| app.send(Command::Next)),
+                        cx.listener(|app, _, _, cx| {
+                            app.begin_transport(Command::Next, "Changing track…", cx);
+                        }),
                     ))
                     .child(button(
                         "vol-down",
@@ -1625,13 +1716,24 @@ fn open_player_window(cx: &mut App) {
                                     return;
                                 }
                                 app.performance.snapshot(&app.snapshot, &snapshot);
+                                let previous_playback = app.snapshot.playback.clone();
+                                if app.playback_pending_resolved(
+                                    &previous_playback,
+                                    &snapshot.playback,
+                                ) {
+                                    app.clear_pending_playback(cx);
+                                }
                                 let playback = snapshot.playback.clone();
+                                let pending_playable = app.pending_playable.clone();
+                                let pending_transport = app.pending_transport.clone();
                                 let audio_ready = matches!(snapshot.audio, AudioState::Ready);
                                 let visible = ready(&snapshot);
                                 let has_playing_list = snapshot.implicit_queue.is_some();
                                 now_playing_updates.update(cx, |now_playing, cx| {
                                     now_playing.update_snapshot(
                                         playback,
+                                        pending_playable,
+                                        pending_transport,
                                         audio_ready,
                                         visible,
                                         has_playing_list,
@@ -1674,6 +1776,10 @@ fn open_player_window(cx: &mut App) {
                     show_playing_list: false,
                     playback_list_projector: RefCell::default(),
                     context_menu: None,
+                    pending_playable: None,
+                    pending_transport: None,
+                    pending_generation: 0,
+                    pending_timeout: Task::ready(()),
                     now_playing_subscription: None,
                 }
             });

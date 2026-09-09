@@ -1,6 +1,6 @@
 //! The adapter that maps the source-neutral contract onto the Spotatui
 //! fork's `frontend` module. Playback ordering remains engine-owned; this
-//! adapter carries source-neutral implicit-list metadata and maps commands to
+//! adapter maps source-neutral implicit-list metadata and commands to
 //! fold-acknowledged fork actions. Pre-boot auth channels return
 //! [`player_core::ActionOutcome::Accepted`] because no fold exists yet. The
 //! application crate never imports the fork.
@@ -14,9 +14,9 @@ use tokio::sync::watch;
 
 use player_core::{
     ActionOutcome, AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection,
-    LibraryState, LoginState, Notice, Playable, PlaybackDevice, PlaybackList,
-    PlaybackListProjector, PlaybackStatus, Runtime, SearchAlbum, SearchArtist, SearchDetail,
-    SearchPlaylist, SearchResults, SearchState, SearchTarget, Snapshot, Source,
+    LibraryState, LoginState, Notice, Playable, PlaybackDevice, PlaybackList, PlaybackStatus,
+    Runtime, SearchAlbum, SearchArtist, SearchDetail, SearchPlaylist, SearchResults, SearchState,
+    SearchTarget, Snapshot, Source,
 };
 use spotatui::frontend::{self, EngineAction, LibraryTarget, Onboarding};
 
@@ -122,14 +122,12 @@ impl Onboarding for BootOnboarding {
 
 pub struct SpotatuiPlayer {
     tx: watch::Sender<Snapshot>,
-    /// Serializes command dispatch with implicit-list metadata updates.
+    /// Serializes command dispatch so command order matches fold order.
     command_lock: Mutex<()>,
     /// Present once boot succeeded; taken by `shutdown`. The terminal bit
     /// closes the hand-off race where shutdown wins before boot stages a
     /// runtime.
     frontend: Mutex<FrontendSlot<frontend::Runtime>>,
-    /// The source list that should resume after the explicit queue drains.
-    implicit_queue: Arc<Mutex<Option<PlaybackList>>>,
     /// Delivers the manual redirect-URL paste to the blocked boot prompt.
     paste_url_tx: mpsc::Sender<String>,
     /// Wakes the boot thread for another attempt after a failed boot.
@@ -181,7 +179,6 @@ pub fn connect(options: ConnectOptions) -> Arc<SpotatuiPlayer> {
         tx: tx.clone(),
         command_lock: Mutex::new(()),
         frontend: Mutex::new(FrontendSlot::default()),
-        implicit_queue: Arc::default(),
         paste_url_tx,
         retry_boot_tx,
         stop_boot: Arc::clone(&stop_boot),
@@ -279,7 +276,6 @@ impl SpotatuiPlayer {
     fn stage(&self, runtime: frontend::Runtime) {
         let mut rx = runtime.subscribe();
         let relay_tx = self.tx.clone();
-        let implicit_queue = Arc::clone(&self.implicit_queue);
         runtime.handle().spawn(async move {
             let mut projections = TranslationCache::default();
             loop {
@@ -304,10 +300,6 @@ impl SpotatuiPlayer {
                         LibraryState::default()
                     });
                 snapshot.library = library;
-                snapshot.implicit_queue = map_implicit_queue(
-                    implicit_queue.lock().unwrap().clone(),
-                    snapshot.playback.as_ref(),
-                );
                 publish(&relay_tx, snapshot);
                 if rx.changed().await.is_err() {
                     break;
@@ -396,25 +388,15 @@ impl Runtime for SpotatuiPlayer {
             }),
             Command::Play(playable) => {
                 self.with_frontend(|_| ())?;
-                *self.implicit_queue.lock().unwrap() = None;
                 self.with_frontend(|runtime| dispatch_command(runtime, Command::Play(playable)))
             }
             Command::PlayFromList { list, index } => {
-                let mut list = (*list).clone();
                 if list.tracks.is_empty() || index >= list.tracks.len() {
                     return None;
                 }
                 self.with_frontend(|_| ())?;
-                list.current_index = index;
-                *self.implicit_queue.lock().unwrap() = Some(list.clone());
                 self.with_frontend(|runtime| {
-                    dispatch_command(
-                        runtime,
-                        Command::PlayFromList {
-                            list: Arc::new(list),
-                            index,
-                        },
-                    )
+                    dispatch_command(runtime, Command::PlayFromList { list, index })
                 })
             }
             other => self.with_frontend(|runtime| dispatch_command(runtime, other)),
@@ -452,6 +434,7 @@ struct TranslationCache {
     search: Option<(CatalogRevision, SearchResults)>,
     detail: Option<(CatalogRevision, SearchDetail)>,
     library: Option<(LibrarySection, CatalogRevision, LibraryState)>,
+    implicit_playback: Option<(Arc<frontend::ImplicitPlaybackList>, Option<PlaybackList>)>,
 }
 
 impl TranslationCache {
@@ -478,6 +461,24 @@ impl TranslationCache {
         }
         let mapped = map_library(fork, section);
         self.library = Some((section, revision, mapped.clone()));
+        mapped
+    }
+
+    fn implicit_playback(
+        &mut self,
+        list: Option<&Arc<frontend::ImplicitPlaybackList>>,
+    ) -> Option<PlaybackList> {
+        let Some(list) = list else {
+            self.implicit_playback = None;
+            return None;
+        };
+        if let Some((cached_list, mapped)) = &self.implicit_playback
+            && Arc::ptr_eq(cached_list, list)
+        {
+            return mapped.clone();
+        }
+        let mapped = map_implicit_queue(Some(list));
+        self.implicit_playback = Some((Arc::clone(list), mapped.clone()));
         mapped
     }
 }
@@ -717,13 +718,18 @@ fn action_for_command(command: Command) -> EngineAction {
             uris: vec![playable.locator],
             offset: None,
         },
-        Command::PlayFromList { list, index } => EngineAction::PlayUris {
+        Command::PlayFromList { list, index } => EngineAction::PlayUrisWithList {
             uris: list
                 .tracks
                 .iter()
                 .map(|playable| playable.locator.clone())
                 .collect(),
-            offset: Some(index),
+            offset: index,
+            list: frontend::ImplicitPlaybackList {
+                source: implicit_playback_source(&list.source),
+                tracks: list.tracks.iter().map(track_info).collect(),
+                current_index: index,
+            },
         },
         Command::Pause => EngineAction::Pause,
         Command::Resume => EngineAction::Play,
@@ -818,12 +824,23 @@ mod tests {
         });
         assert_eq!(
             action,
-            EngineAction::PlayUris {
+            EngineAction::PlayUrisWithList {
                 uris: vec![
                     "spotify:track:first".to_string(),
                     "spotify:track:second".to_string(),
                 ],
-                offset: Some(1),
+                offset: 1,
+                list: frontend::ImplicitPlaybackList {
+                    source: frontend::ImplicitPlaybackSource::Album {
+                        locator: "spotify:album:album".to_string(),
+                        name: "Album".to_string(),
+                    },
+                    tracks: vec![
+                        track_info(&playable("spotify:track:first")),
+                        track_info(&playable("spotify:track:second")),
+                    ],
+                    current_index: 1,
+                },
             }
         );
     }
@@ -874,32 +891,30 @@ mod tests {
     }
 
     #[test]
-    fn implicit_list_cursor_follows_the_playback_snapshot() {
-        let list = PlaybackList {
-            source: player_core::PlaybackListSource::SearchResults {
+    fn implicit_list_cursor_is_taken_from_the_engine_snapshot() {
+        let list = frontend::ImplicitPlaybackList {
+            source: frontend::ImplicitPlaybackSource::SearchResults {
                 query: "query".to_string(),
             },
-            tracks: vec![
-                playable("spotify:track:first"),
-                playable("spotify:track:second"),
-            ]
-            .into(),
+            tracks: vec![track("first"), track("second"), track("first")],
+            current_index: 2,
+        };
+        assert_eq!(map_implicit_queue(Some(&list)).unwrap().current_index, 2);
+    }
+
+    #[test]
+    fn implicit_list_mapping_rejects_unplayable_rows() {
+        let list = frontend::ImplicitPlaybackList {
+            source: frontend::ImplicitPlaybackSource::SearchResults {
+                query: "query".to_string(),
+            },
+            tracks: vec![frontend::TrackInfo {
+                uri: None,
+                ..track("missing-uri")
+            }],
             current_index: 0,
         };
-        let playback = PlaybackStatus {
-            playable: playable("spotify:track:second"),
-            device: PlaybackDevice::Native,
-            is_playing: true,
-            position_ms: 0,
-            observed_at: std::time::Instant::now(),
-            volume_percent: None,
-        };
-        assert_eq!(
-            map_implicit_queue(Some(list), Some(&playback))
-                .unwrap()
-                .current_index,
-            1
-        );
+        assert!(map_implicit_queue(Some(&list)).is_none());
     }
 
     /// Fork state while idle-with-results and playing.
@@ -1032,6 +1047,28 @@ mod tests {
             other => panic!("expected done search, got {other:?}"),
         };
         assert!(!Arc::ptr_eq(&first_rows, &replaced_rows));
+    }
+
+    #[test]
+    fn implicit_playback_translation_reuses_unchanged_engine_lists() {
+        let mut fork = frontend::Snapshot::default();
+        fork.implicit_playback = Some(Arc::new(frontend::ImplicitPlaybackList {
+            source: frontend::ImplicitPlaybackSource::SearchResults {
+                query: "query".to_string(),
+            },
+            tracks: vec![track("one"), track("two")],
+            current_index: 0,
+        }));
+        let mut cache = TranslationCache::default();
+
+        let first = map_snapshot_cached(&fork, None, &mut cache);
+        let first_tracks = first.implicit_queue.unwrap().tracks;
+
+        fork.position_ms = Some(1);
+        let reused = map_snapshot_cached(&fork, None, &mut cache);
+        let reused_tracks = reused.implicit_queue.unwrap().tracks;
+
+        assert!(Arc::ptr_eq(&first_tracks, &reused_tracks));
     }
 
     #[test]
@@ -1556,6 +1593,10 @@ fn map_snapshot_inner(
         .iter()
         .filter_map(playable_from_track)
         .collect();
+    let implicit_queue = match cache.as_deref_mut() {
+        Some(cache) => cache.implicit_playback(fork.implicit_playback.as_ref()),
+        None => map_implicit_queue(fork.implicit_playback.as_deref()),
+    };
 
     let audio = if fork.audio_ready {
         AudioState::Ready
@@ -1575,7 +1616,7 @@ fn map_snapshot_inner(
         search_detail,
         playback,
         queue,
-        implicit_queue: None,
+        implicit_queue,
         library: LibraryState::Idle,
         audio,
         notice: notice.map(|message| Notice {
@@ -1585,12 +1626,83 @@ fn map_snapshot_inner(
     }
 }
 
-fn map_implicit_queue(
-    mut list: Option<PlaybackList>,
-    playback: Option<&PlaybackStatus>,
-) -> Option<PlaybackList> {
-    if let (Some(list), Some(playback)) = (list.as_mut(), playback) {
-        PlaybackListProjector::align_cursor(list, &playback.playable);
+fn implicit_playback_source(
+    source: &player_core::PlaybackListSource,
+) -> frontend::ImplicitPlaybackSource {
+    match source {
+        player_core::PlaybackListSource::LikedSongs => frontend::ImplicitPlaybackSource::LikedSongs,
+        player_core::PlaybackListSource::RecentlyPlayed => {
+            frontend::ImplicitPlaybackSource::RecentlyPlayed
+        }
+        player_core::PlaybackListSource::SearchResults { query } => {
+            frontend::ImplicitPlaybackSource::SearchResults {
+                query: query.clone(),
+            }
+        }
+        player_core::PlaybackListSource::Artist { locator, name } => {
+            frontend::ImplicitPlaybackSource::Artist {
+                locator: locator.clone(),
+                name: name.clone(),
+            }
+        }
+        player_core::PlaybackListSource::Album { locator, name } => {
+            frontend::ImplicitPlaybackSource::Album {
+                locator: locator.clone(),
+                name: name.clone(),
+            }
+        }
+        player_core::PlaybackListSource::Playlist { locator, name } => {
+            frontend::ImplicitPlaybackSource::Playlist {
+                locator: locator.clone(),
+                name: name.clone(),
+            }
+        }
     }
-    list
+}
+
+fn map_implicit_queue(list: Option<&frontend::ImplicitPlaybackList>) -> Option<PlaybackList> {
+    let list = list?;
+    let tracks = list
+        .tracks
+        .iter()
+        .map(playable_from_track)
+        .collect::<Option<Vec<_>>>()?;
+    if tracks.is_empty() || list.current_index >= tracks.len() {
+        return None;
+    }
+    Some(PlaybackList {
+        source: match &list.source {
+            frontend::ImplicitPlaybackSource::LikedSongs => {
+                player_core::PlaybackListSource::LikedSongs
+            }
+            frontend::ImplicitPlaybackSource::RecentlyPlayed => {
+                player_core::PlaybackListSource::RecentlyPlayed
+            }
+            frontend::ImplicitPlaybackSource::SearchResults { query } => {
+                player_core::PlaybackListSource::SearchResults {
+                    query: query.clone(),
+                }
+            }
+            frontend::ImplicitPlaybackSource::Artist { locator, name } => {
+                player_core::PlaybackListSource::Artist {
+                    locator: locator.clone(),
+                    name: name.clone(),
+                }
+            }
+            frontend::ImplicitPlaybackSource::Album { locator, name } => {
+                player_core::PlaybackListSource::Album {
+                    locator: locator.clone(),
+                    name: name.clone(),
+                }
+            }
+            frontend::ImplicitPlaybackSource::Playlist { locator, name } => {
+                player_core::PlaybackListSource::Playlist {
+                    locator: locator.clone(),
+                    name: name.clone(),
+                }
+            }
+        },
+        tracks: tracks.into(),
+        current_index: list.current_index,
+    })
 }

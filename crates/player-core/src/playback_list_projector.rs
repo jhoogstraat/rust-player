@@ -70,7 +70,12 @@ impl PlaybackListProjector {
                 *revision,
                 tracks,
             ),
-            (SearchTarget::Album { locator, name }, SearchDetail::Album { revision, tracks, .. }) => (
+            (
+                SearchTarget::Album { locator, name },
+                SearchDetail::Album {
+                    revision, tracks, ..
+                },
+            ) => (
                 PlaybackListSource::Album {
                     locator: locator.clone(),
                     name: name.clone(),
@@ -80,7 +85,9 @@ impl PlaybackListProjector {
             ),
             (
                 SearchTarget::Playlist { locator, name, .. },
-                SearchDetail::Playlist { revision, tracks, .. },
+                SearchDetail::Playlist {
+                    revision, tracks, ..
+                },
             ) => (
                 PlaybackListSource::Playlist {
                     locator: locator.clone(),

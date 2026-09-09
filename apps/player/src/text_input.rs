@@ -74,15 +74,6 @@ impl TextField {
         self.cursor += text.chars().count();
     }
 
-    pub fn paste(&mut self, text: &str) -> bool {
-        let text = text.lines().next().unwrap_or_default();
-        if text.is_empty() {
-            return false;
-        }
-        self.insert(text);
-        true
-    }
-
     /// Remove the character before the cursor.
     fn backspace(&mut self) {
         if self.cursor == 0 {

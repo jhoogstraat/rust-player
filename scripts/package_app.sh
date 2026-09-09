@@ -66,8 +66,6 @@ for dylib in $(otool -L "$BIN" | awk '{print $1}' | grep -E '\.(dylib|so)$' || t
 done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN"
 
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
-
 echo "==> verifying no Homebrew paths in the bundle's dynamic closure"
 FAIL=0
 while IFS= read -r dylib_path; do
@@ -91,6 +89,10 @@ Rust Player
 - Spotatui fork & librespot stack (MIT/Apache-2.0) — see the fork repository
 - PortAudio (MIT) — https://github.com/PortAudio/portaudio
 NOTICES
+
+echo "==> signing bundle"
+codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+codesign --verify --deep --strict "$APP_DIR"
 
 echo
 echo "bundle ready: $APP_DIR"

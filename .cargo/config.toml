@@ -1,6 +1,11 @@
 [net]
 git-fetch-with-cli = true
 
+# Use the sibling engine checkout while its macOS lifecycle fix is reviewed.
+# Remove this override after publishing and pinning that engine revision.
+[patch."https://github.com/jhoogstraat/spotatui"]
+spotatui = { path = "../spotatui-player-performance" }
+
 # The engine's upstream repo carries a `spotatui.wiki` git submodule pointing
 # at a third-party wiki that no longer exists (LargeModGames/spotatui.wiki).
 # Nothing in the crate builds from it; skip fetching submodules entirely.

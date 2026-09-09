@@ -27,19 +27,24 @@ CI never verifies audible output; this document is the only place that does.
 5. **Transport.** Pause, resume, next, previous, volume up/down all reflect
    in the bar via the next snapshot. Space toggles playback when no text
    field has focus; ⌘→ / ⌘← skip; ⌘↑ / ⌘↓ change volume.
-6. **Queue.** “+ Queue” on several rows adds without interrupting playback;
+6. **System Now Playing.** Open the macOS menu-bar/Control Center Now Playing
+   surface while audio is playing. Title, artists, album, duration, and
+   artwork when available are shown. Its play/pause, previous, and next
+   controls change the same Playback Session as the window controls. Close
+   the Rust Player window and verify the system controls still work.
+7. **Queue.** “+ Queue” on several rows adds without interrupting playback;
    the panel lists them; ↑ ↓ move items; ✕ removes one; Clear upcoming leaves
    the active track playing and empties the panel.
-7. **Keyboard.** Tab reaches every control; ⌘F focuses search; ⌘K toggles the
+8. **Keyboard.** Tab reaches every control; ⌘F focuses search; ⌘K toggles the
    queue panel.
-8. **Close & reopen.** Close the window: audio keeps playing and the process
+9. **Close & reopen.** Close the window: audio keeps playing and the process
    stays alive. Click the dock icon: the window returns around the same state.
-9. **Quit.** ⌘Q stops playback and exits cleanly. Relaunch restores state
-   without re-authenticating.
-10. **Offline catalog (optional but encouraged).** Pull the network mid-track:
+10. **Quit.** ⌘Q stops playback and exits cleanly, and the system Now Playing
+    metadata clears. Relaunch restores state without re-authenticating.
+11. **Offline catalog (optional but encouraged).** Pull the network mid-track:
     audio continues; a search attempt fails with a visible Retry that clears
     on success once the network returns.
-11. **Logs.** `~/Library/Application Support/rust-player/logs/player.log`
+12. **Logs.** `~/Library/Application Support/rust-player/logs/player.log`
     exists, rotates, and contains no tokens or OAuth codes.
 
 ## Recording results

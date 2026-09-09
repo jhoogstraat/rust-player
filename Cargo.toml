@@ -15,14 +15,10 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "239d0aa1
 player-core = { path = "crates/player-core" }
 player-spotatui = { path = "crates/player-spotatui" }
 
-# Production will pin the private fork over Git once its frontend API is
-# public: git = "https://github.com/jhoogstraat/spotatui", rev = "...". The
-# path dependency on the sibling checkout is the documented local override
-# for coordinated development until that revision is cut.
-# Engine consumed via a Git pin (ADR 0015 end state; ADR 0016 stage 4):
-# the fork morph is complete and the local path override is retired. A
-# `.cargo/config.toml` enables CLI git fetch so credential management
-# matches normal git usage.
-spotatui = { git = "https://github.com/jhoogstraat/spotatui", rev = "91f0363134791ca311843ac632aef292588868bd", default-features = false, features = ["streaming"] }
+# Keep the production dependency as a Git pin. During coordinated local
+# development, `.cargo/config.toml` patches it to the sibling engine checkout
+# so the app exercises unreleased engine fixes; remove that patch after the
+# engine revision is published and pinned.
+spotatui = { git = "https://github.com/jhoogstraat/spotatui", rev = "91f0363134791ca311843ac632aef292588868bd", default-features = false, features = ["streaming", "macos-media"] }
 
 tokio = { version = "1", default-features = false, features = ["sync"] }

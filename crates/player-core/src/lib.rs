@@ -135,23 +135,21 @@ impl SearchDetail {
     /// Match the loaded result to a target using adapter-canonicalized locators.
     pub fn matches_target(&self, target: &SearchTarget) -> bool {
         let (locator, detail_locator) = match (target, self) {
-            (
-                SearchTarget::Artist { locator, .. },
-                SearchDetail::Artist { target_locator, .. },
-            ) => (locator, target_locator),
-            (
-                SearchTarget::Album { locator, .. },
-                SearchDetail::Album { target_locator, .. },
-            ) => (locator, target_locator),
+            (SearchTarget::Artist { locator, .. }, SearchDetail::Artist { target_locator, .. }) => {
+                (locator, target_locator)
+            }
+            (SearchTarget::Album { locator, .. }, SearchDetail::Album { target_locator, .. }) => {
+                (locator, target_locator)
+            }
             (
                 SearchTarget::Playlist { locator, .. },
                 SearchDetail::Playlist { target_locator, .. },
             ) => (locator, target_locator),
             _ => return false,
         };
-        detail_locator.as_deref().is_some_and(|detail_locator| {
-            locator == detail_locator
-        })
+        detail_locator
+            .as_deref()
+            .is_some_and(|detail_locator| locator == detail_locator)
     }
 
     pub fn is_complete(&self) -> bool {

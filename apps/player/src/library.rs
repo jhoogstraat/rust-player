@@ -170,6 +170,7 @@ fn track_row_with_list(
         || Command::Play(play.clone()),
         |list| Command::PlayFromList { list, index },
     );
+    let pending_playable = playable.clone();
     div()
         .id(SharedString::from(format!("library-track-{index}")))
         .w_full()
@@ -183,7 +184,9 @@ fn track_row_with_list(
         .gap(px(10.0))
         .cursor_pointer()
         .hover(|style| style.bg(tone(PANEL, 0.60)))
-        .on_click(cx.listener(move |app, _, _, _| app.send(play_command.clone())))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.begin_playback(pending_playable.clone(), play_command.clone(), cx);
+        }))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
