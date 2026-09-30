@@ -6,20 +6,21 @@
 //! runtime through the parent application's command seam.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     ClickEvent, Context, EventEmitter, Hsla, IntoElement, ParentElement, SharedString, Styled,
     Task, Window, div, prelude::*, px, relative, rgb,
 };
-use player_core::{AudioState, Playable, PlaybackDevice, PlaybackStatus, Snapshot};
+use player_core::{AudioState, LoginState, Playable, PlaybackDevice, PlaybackStatus, Snapshot};
 
 use crate::{ACCENT, MUTED, Performance, border, clock, small_button, tone};
 
-const FOCUSED_PROGRESS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-const BACKGROUND_PROGRESS_UPDATE_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(500);
-const CLOCK_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_000);
+/// The shortest wait between progress updates, used while the window is focused.
+const FOCUSED_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+/// The longest wait, and the only one in the background. It stays well under
+/// a second so the clock label never skips one.
+const BACKGROUND_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) enum NowPlayingEvent {
     ViewList,
@@ -40,8 +41,10 @@ pub(crate) struct NowPlaying {
     audio_ready: bool,
     visible: bool,
     has_playing_list: bool,
-    progress: gpui::Entity<ProgressBar>,
-    clock_task: Task<()>,
+    performance: Arc<Performance>,
+    progress_task: Task<()>,
+    /// The wait before the next progress update, refreshed by every render.
+    progress_interval: Duration,
     title_line: SharedString,
     duration_ms: u64,
     clock_second: Option<u64>,
@@ -54,41 +57,31 @@ impl NowPlaying {
         performance: Arc<Performance>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let playback = snapshot.playback.clone();
-        let (title_line, duration_ms) = playback_metadata(playback.as_ref());
+        let (title_line, duration_ms) = playback_metadata(None);
         let mut now_playing = Self {
-            playback,
+            playback: None,
             pending_playable: None,
             pending_transport: None,
-            audio_ready: matches!(snapshot.audio, AudioState::Ready),
-            visible: matches!(snapshot.login, player_core::LoginState::Ready),
-            has_playing_list: snapshot.implicit_queue.is_some(),
-            progress: cx.new(|cx| ProgressBar::new(snapshot, performance, cx)),
-            clock_task: Task::ready(()),
+            audio_ready: false,
+            visible: false,
+            has_playing_list: false,
+            performance,
+            progress_task: Task::ready(()),
+            progress_interval: FOCUSED_PROGRESS_UPDATE_INTERVAL,
             title_line,
             duration_ms,
             clock_second: None,
             clock_label: SharedString::default(),
         };
-        if now_playing.active() {
-            now_playing.start_clock_updates(cx);
-        }
+        now_playing.update_snapshot(snapshot, cx);
         now_playing
     }
 
-    pub(crate) fn update_snapshot(
-        &mut self,
-        playback: Option<PlaybackStatus>,
-        pending_playable: Option<Playable>,
-        pending_transport: Option<SharedString>,
-        audio_ready: bool,
-        visible: bool,
-        has_playing_list: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.playback == playback
-            && self.pending_playable == pending_playable
-            && self.pending_transport == pending_transport
+    pub(crate) fn update_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        let audio_ready = matches!(snapshot.audio, AudioState::Ready);
+        let visible = matches!(snapshot.login, LoginState::Ready);
+        let has_playing_list = snapshot.implicit_queue.is_some();
+        if self.playback == snapshot.playback
             && self.audio_ready == audio_ready
             && self.visible == visible
             && self.has_playing_list == has_playing_list
@@ -96,13 +89,8 @@ impl NowPlaying {
             return;
         }
         let was_active = self.active();
-        let has_playing_list_changed = self.has_playing_list != has_playing_list;
-        let playback_for_progress = playback.clone();
-        let playback_changed = self.playback != playback;
-        self.playback = playback;
-        self.pending_playable = pending_playable;
-        self.pending_transport = pending_transport;
-        if playback_changed {
+        if self.playback != snapshot.playback {
+            self.playback = snapshot.playback.clone();
             (self.title_line, self.duration_ms) = playback_metadata(self.playback.as_ref());
             self.clock_second = None;
             self.clock_label = SharedString::default();
@@ -110,20 +98,7 @@ impl NowPlaying {
         self.audio_ready = audio_ready;
         self.visible = visible;
         self.has_playing_list = has_playing_list;
-        let pending = self.pending_playable.is_some() || self.pending_transport.is_some();
-        let active = self.active();
-        if active && !was_active {
-            self.start_clock_updates(cx);
-        } else if !active && was_active {
-            self.clock_task = Task::ready(());
-        }
-        self.progress.update(cx, |progress, cx| {
-            progress.update_pending(pending, cx);
-            progress.update_snapshot(playback_for_progress, audio_ready, visible, cx)
-        });
-        if playback_changed || has_playing_list_changed {
-            cx.notify();
-        }
+        self.changed(was_active, cx);
     }
 
     pub(crate) fn update_pending(
@@ -139,144 +114,33 @@ impl NowPlaying {
         let was_active = self.active();
         self.pending_playable = pending_playable;
         self.pending_transport = pending_transport;
-        let pending = self.pending_playable.is_some() || self.pending_transport.is_some();
-        let active = self.active();
-        if active && !was_active {
-            self.start_clock_updates(cx);
-        } else if !active && was_active {
-            self.clock_task = Task::ready(());
+        self.changed(was_active, cx);
+    }
+
+    /// Repaint after a state change, and start progress updates if the change
+    /// made the bar move. A running task ends itself once the bar stops.
+    fn changed(&mut self, was_active: bool, cx: &mut Context<Self>) {
+        if self.active() && !was_active {
+            self.progress_task = cx.spawn(async move |this, cx| {
+                while let Ok(Some(interval)) = this.update(cx, |now_playing, cx| {
+                    now_playing.active().then(|| {
+                        cx.notify();
+                        now_playing.progress_interval
+                    })
+                }) {
+                    cx.background_executor().timer(interval).await;
+                }
+            });
         }
-        self.progress.update(cx, |progress, cx| {
-            progress.update_pending(pending, cx);
-        });
         cx.notify();
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending_playable.is_some() || self.pending_transport.is_some()
     }
 
     fn active(&self) -> bool {
-        !(self.pending_playable.is_some() || self.pending_transport.is_some())
-            && should_animate(
-                self.visible,
-                self.audio_ready,
-                self.playback.as_ref().map(|p| p.device),
-                self.playback.as_ref().is_some_and(|p| p.is_playing),
-            )
-    }
-
-    fn start_clock_updates(&mut self, cx: &mut Context<Self>) {
-        self.clock_task = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(CLOCK_UPDATE_INTERVAL).await;
-                let Ok(active) = this.update(cx, |now_playing, cx| {
-                    let active = now_playing.active();
-                    if active {
-                        cx.notify();
-                    }
-                    active
-                }) else {
-                    break;
-                };
-                if !active {
-                    break;
-                }
-            }
-        });
-    }
-}
-
-struct ProgressBar {
-    playback: Option<PlaybackStatus>,
-    audio_ready: bool,
-    visible: bool,
-    pending: bool,
-    performance: Arc<Performance>,
-    progress_task: Task<()>,
-    window_active: bool,
-}
-
-impl ProgressBar {
-    fn new(snapshot: &Snapshot, performance: Arc<Performance>, cx: &mut Context<Self>) -> Self {
-        let mut progress = Self {
-            playback: snapshot.playback.clone(),
-            audio_ready: matches!(snapshot.audio, AudioState::Ready),
-            visible: matches!(snapshot.login, player_core::LoginState::Ready),
-            pending: false,
-            performance,
-            progress_task: Task::ready(()),
-            window_active: true,
-        };
-        if progress.active() {
-            progress.start_progress_updates(cx);
-        }
-        progress
-    }
-
-    fn update_snapshot(
-        &mut self,
-        playback: Option<PlaybackStatus>,
-        audio_ready: bool,
-        visible: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.playback == playback && self.audio_ready == audio_ready && self.visible == visible {
-            return;
-        }
-        let was_active = self.active();
-        self.playback = playback;
-        self.audio_ready = audio_ready;
-        self.visible = visible;
-        let active = self.active();
-        if active && !was_active {
-            self.start_progress_updates(cx);
-        } else if !active && was_active {
-            self.progress_task = Task::ready(());
-        }
-        cx.notify();
-    }
-
-    fn update_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
-        if self.pending == pending {
-            return;
-        }
-        let was_active = self.active();
-        self.pending = pending;
-        let active = self.active();
-        if active && !was_active {
-            self.start_progress_updates(cx);
-        } else if !active && was_active {
-            self.progress_task = Task::ready(());
-        }
-        cx.notify();
-    }
-
-    fn start_progress_updates(&mut self, cx: &mut Context<Self>) {
-        self.progress_task = cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(Some(interval)) = this.update(cx, |progress, _| {
-                    progress
-                        .active()
-                        .then(|| progress_update_interval(progress.window_active))
-                }) else {
-                    break;
-                };
-                cx.background_executor().timer(interval).await;
-                let Ok(active) = this.update(cx, |progress, cx| {
-                    let active = progress.active();
-                    if active {
-                        cx.notify();
-                    }
-                    active
-                }) else {
-                    break;
-                };
-                if !active {
-                    break;
-                }
-            }
-        });
-    }
-
-    fn active(&self) -> bool {
-        !self.pending
+        !self.has_pending()
             && should_animate(
                 self.visible,
                 self.audio_ready,
@@ -326,23 +190,40 @@ fn should_animate(
     visible && audio_ready && device == Some(PlaybackDevice::Native) && playing
 }
 
-fn progress_update_interval(window_active: bool) -> std::time::Duration {
-    if window_active {
+/// The wait until the bar can look different. GPUI snaps the bar to device
+/// pixels, so updating before the track has moved by one pixel's worth of
+/// time would repaint an identical frame.
+fn progress_update_interval(duration_ms: u64, device_width: f32, window_active: bool) -> Duration {
+    let shortest = if window_active {
         FOCUSED_PROGRESS_UPDATE_INTERVAL
     } else {
         BACKGROUND_PROGRESS_UPDATE_INTERVAL
-    }
+    };
+    Duration::from_millis(duration_ms)
+        .div_f32(device_width.max(1.))
+        .clamp(shortest, BACKGROUND_PROGRESS_UPDATE_INTERVAL)
 }
 
 impl gpui::Render for NowPlaying {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_pending = self.pending_playable.is_some() || self.pending_transport.is_some();
-        let position_ms = match (&self.playback, has_pending) {
-            (_, true) => 0,
-            (Some(p), false) => player_core::project_position(p, Instant::now()),
-            (None, false) => 0,
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = self.performance.enabled.then(Instant::now);
+        let active = self.active();
+        let has_pending = self.has_pending();
+        let position_ms = match &self.playback {
+            Some(p) if !has_pending => player_core::project_position(p, Instant::now()),
+            _ => 0,
         };
         let duration_ms = if has_pending { 0 } else { self.duration_ms };
+        let progress = if duration_ms > 0 {
+            (position_ms as f32 / duration_ms as f32).clamp(0., 1.)
+        } else {
+            0.
+        };
+        self.progress_interval = progress_update_interval(
+            duration_ms,
+            f32::from(window.viewport_size().width) * window.scale_factor(),
+            window.is_window_active(),
+        );
         let clock_label = if duration_ms > 0 {
             let second = position_ms / 1000;
             if self.clock_second != Some(second) {
@@ -363,14 +244,22 @@ impl gpui::Render for NowPlaying {
         .unwrap_or_else(|| self.title_line.clone());
 
         let has_playing_list = self.has_playing_list;
-        div()
+        let element = div()
             .id("now-playing")
             .border_t_1()
             .border_color(border())
             .h(px(40.))
             .relative()
             .bg(tone(0x232328, 0.75))
-            .child(self.progress.clone())
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(relative(progress))
+                    .bg(Hsla::from(rgb(ACCENT)).opacity(0.55)),
+            )
             .child(
                 div()
                     .size_full()
@@ -414,41 +303,31 @@ impl gpui::Render for NowPlaying {
                         (duration_ms as f32 * fraction) as u64,
                     ));
                 }
-            }))
-    }
-}
-
-impl gpui::Render for ProgressBar {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.window_active = window.is_window_active();
-        let active = self.active();
-        let started = self.performance.enabled.then(Instant::now);
-        let (position_ms, duration_ms) = if self.pending {
-            (0, 0)
-        } else {
-            match &self.playback {
-                Some(playback) => (
-                    player_core::project_position(playback, Instant::now()),
-                    playback.playable.duration_ms,
-                ),
-                None => (0, 0),
-            }
-        };
-        let progress = if duration_ms > 0 {
-            (position_ms as f32 / duration_ms as f32).clamp(0., 1.)
-        } else {
-            0.
-        };
-        let element = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left_0()
-            .w(relative(progress))
-            .bg(Hsla::from(rgb(ACCENT)).opacity(0.55));
+            }));
         if let Some(started) = started {
             self.performance.render(started.elapsed(), active);
         }
         element
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_updates_wait_for_the_next_device_pixel_within_bounds() {
+        let interval = |duration_s: u64, width, active| {
+            progress_update_interval(duration_s * 1000, width, active).as_millis()
+        };
+        // A four-minute track on a 960 px bar moves one pixel every 250 ms.
+        assert_eq!(interval(240, 960., true), 250);
+        // Wide bars and short tracks never update faster than the focused rate.
+        assert_eq!(interval(240, 3840., true), 100);
+        // Long tracks still update often enough for the clock label.
+        assert_eq!(interval(3600, 960., true), 500);
+        assert_eq!(interval(240, 3840., false), 500);
+        // Nothing playing and an unmeasured window are not special cases.
+        assert_eq!(interval(0, 0., true), 100);
     }
 }

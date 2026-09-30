@@ -27,7 +27,7 @@ are already deduplicated by the runtime and the UI). `catalog_changes` counts
 changes to search, detail, or library projections as observed by GPUI;
 `adapter_snapshot_translations` and `adapter_library_translations` count the
 actual source-adapter translation functions. The remaining three fields cover
-progress-bar renders during active Native Playback and their average/max Rust
+now-playing bar renders during active Native Playback and their average/max Rust
 render-construction cost. Catalog work therefore has separate counters from
 progress work.
 
@@ -84,8 +84,10 @@ run continuously. Perform one catalog search before starting the sampler, then
 do not browse or search during the window. Quit with `⌘Q` after sampling and
 save the `[perf]` line and raw `powermetrics` output.
 
-An active pass should show `playback_renders` at about 10/s while the window
-is focused (2/s while it is in the background). Report average and maximum
+An active pass should show `playback_renders` between 2/s and 10/s while the
+window is focused: one per device pixel the progress bar advances (window
+width in device pixels ÷ track seconds), and 2/s in the background. Report
+average and maximum
 render-construction cost as a comparison trend; these counters exclude GPUI
 layout/paint and are not a hard gate. Adapter translation counters must not
 increase from progress updates. Catalog changes must stay flat during the
@@ -98,7 +100,7 @@ not mistaken for the paused-idle gate.
 | Scenario | Pass condition |
 | --- | --- |
 | Paused idle, 60 s | <1% mean process CPU; ≤5 wakeups/s p95; zero post-settle snapshot publications |
-| Active Native Playback, 60 s | `playback_renders` stays near 10/s with the window focused; render-construction timing is reported for comparison; adapter/catalog counters stay flat during the window |
+| Active Native Playback, 60 s | `playback_renders` stays between 2/s and 10/s with the window focused, matching the bar's device pixels per second; render-construction timing is reported for comparison; adapter/catalog counters stay flat during the window |
 
 Attach the commit, build/runtime conditions, sampler output, and the final
 `[perf]` line to the result. Any unexplained threshold failure blocks a

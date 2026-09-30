@@ -66,6 +66,7 @@ Log evidence shows idle windows with zero snapshot publications.
 
 The window does not use `request_animation_frame()`. A frame-rate repaint loop
 pegs the GPU on high-refresh displays, so visible position is projected on
-timers instead: the progress bar every 100 ms while the window is focused and
-every 500 ms in the background, the clock once a second, and nothing at all
-while playback is paused, pending, or on Remote Playback.
+timers instead: the now-playing bar once per device pixel of progress, no
+faster than every 100 ms while the window is focused and every 500 ms
+otherwise, and nothing at all while playback is paused, pending, or on Remote
+Playback. The clock label rides the same updates.

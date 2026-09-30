@@ -27,8 +27,8 @@ use gpui::{
     div, hsla, prelude::*, px, rgb, uniform_list,
 };
 use player_core::{
-    AudioState, Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListProjector,
-    Runtime, SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
+    Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListProjector, Runtime,
+    SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
 };
 use text_input::{KeyOutcome, TextField};
 
@@ -1731,29 +1731,14 @@ fn open_player_window(cx: &mut App) {
                                     return;
                                 }
                                 app.performance.snapshot(&app.snapshot, &snapshot);
-                                let previous_playback = app.snapshot.playback.clone();
                                 if app.playback_pending_resolved(
-                                    &previous_playback,
+                                    &app.snapshot.playback,
                                     &snapshot.playback,
                                 ) {
                                     app.clear_pending_playback(cx);
                                 }
-                                let playback = snapshot.playback.clone();
-                                let pending_playable = app.pending_playable.clone();
-                                let pending_transport = app.pending_transport.clone();
-                                let audio_ready = matches!(snapshot.audio, AudioState::Ready);
-                                let visible = ready(&snapshot);
-                                let has_playing_list = snapshot.implicit_queue.is_some();
                                 now_playing_updates.update(cx, |now_playing, cx| {
-                                    now_playing.update_snapshot(
-                                        playback,
-                                        pending_playable,
-                                        pending_transport,
-                                        audio_ready,
-                                        visible,
-                                        has_playing_list,
-                                        cx,
-                                    );
+                                    now_playing.update_snapshot(&snapshot, cx);
                                 });
                                 app.snapshot = snapshot;
                                 // First ready snapshot: load the section the
