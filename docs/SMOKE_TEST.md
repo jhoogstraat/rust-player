@@ -33,10 +33,10 @@ CI never verifies audible output; this document is the only place that does.
    controls change the same Playback Session as the window controls. Close
    the Rust Player window and verify the system controls still work.
 7. **Queue.** “+ Queue” on several rows adds without interrupting playback;
-   the panel lists them; ↑ ↓ move items; ✕ removes one; Clear upcoming leaves
+   the panel lists them; ↑ ↓ move items; ✕ removes one; Clear leaves
    the active track playing and empties the panel.
-8. **Keyboard.** Tab reaches every control; ⌘F focuses search; ⌘K toggles the
-   queue panel.
+8. **Keyboard.** ⌘F or `/` focuses search and Escape leaves the field. With
+   no text field focused, `n` / `p` skip and `+` / `-` change volume.
 9. **Close & reopen.** Close the window: audio keeps playing and the process
    stays alive. Click the dock icon: the window returns around the same state.
 10. **Quit.** ⌘Q stops playback and exits cleanly, and the system Now Playing

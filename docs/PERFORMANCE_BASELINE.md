@@ -19,17 +19,17 @@ Use a fresh data directory for each run. Set `RUST_PLAYER_PERF=1`; the app
 then writes one `[perf]` summary to `logs/player.log` when it quits cleanly:
 
 ```text
-[perf] snapshots=… catalog_changes=… progress_updates=… playback_renders=… render_avg_us=… render_max_us=… adapter_snapshot_translations=… adapter_library_translations=…
+[perf] snapshots=… catalog_changes=… playback_renders=… render_avg_us=… render_max_us=… adapter_snapshot_translations=… adapter_library_translations=…
 ```
 
 `snapshots` counts changed snapshots delivered to GPUI (identical publications
 are already deduplicated by the runtime and the UI). `catalog_changes` counts
 changes to search, detail, or library projections as observed by GPUI;
 `adapter_snapshot_translations` and `adapter_library_translations` count the
-actual source-adapter translation functions. The remaining four fields cover
-animation-frame requests, active Playback Session renders, and their
-total/max Rust render-construction cost. Catalog work therefore has separate
-counters from animation work.
+actual source-adapter translation functions. The remaining three fields cover
+progress-bar renders during active Native Playback and their average/max Rust
+render-construction cost. Catalog work therefore has separate counters from
+progress work.
 
 Capture process CPU and wakeups in a second terminal. Keep the sampler window
 at 60 one-second samples (a 60-second observation window), and keep the PID
@@ -84,8 +84,8 @@ run continuously. Perform one catalog search before starting the sampler, then
 do not browse or search during the window. Quit with `⌘Q` after sampling and
 save the `[perf]` line and raw `powermetrics` output.
 
-An active pass should update the now-playing progress at about 10/s, with
-`playback_renders` tracking those updates. Report average and maximum
+An active pass should show `playback_renders` at about 10/s while the window
+is focused (2/s while it is in the background). Report average and maximum
 render-construction cost as a comparison trend; these counters exclude GPUI
 layout/paint and are not a hard gate. Adapter translation counters must not
 increase from progress updates. Catalog changes must stay flat during the
@@ -98,7 +98,7 @@ not mistaken for the paused-idle gate.
 | Scenario | Pass condition |
 | --- | --- |
 | Paused idle, 60 s | <1% mean process CPU; ≤5 wakeups/s p95; zero post-settle snapshot publications |
-| Active Native Playback, 60 s | progress updates remain near 10/s; renders ≥95% of updates; render-construction timing is reported for comparison; adapter/catalog counters stay flat during the window |
+| Active Native Playback, 60 s | `playback_renders` stays near 10/s with the window focused; render-construction timing is reported for comparison; adapter/catalog counters stay flat during the window |
 
 Attach the commit, build/runtime conditions, sampler output, and the final
 `[perf]` line to the result. Any unexplained threshold failure blocks a

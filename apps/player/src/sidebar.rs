@@ -1,6 +1,6 @@
 //! The fixed left-edge navigation sidebar, following the Comet shell's
-//! column pattern: a fixed-width column of nav rows with the bottom item
-//! pinned, its own slightly lighter surface, and a right hairline. Row
+//! column pattern: a fixed-width column of nav rows on its own slightly
+//! lighter surface, with a right hairline. Row
 //! geometry is Comet's settings-nav recipe (8px-rounded row, 16px icon,
 //! 13px label; selection = white wash + medium weight, hover brightens).
 
@@ -16,14 +16,13 @@ use crate::{PANEL, PlayerApp, TEXT, border, icons, tone, wash};
 pub(crate) const SIDEBAR_WIDTH: f32 = 256.0;
 
 /// Where the app is navigated. Library sections browse the second column;
-/// Settings swaps the main area.
+/// Search swaps the main area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavSection {
     Search,
     LikedSongs,
     RecentlyPlayed,
     Playlists,
-    Settings,
 }
 
 impl NavSection {
@@ -34,7 +33,6 @@ impl NavSection {
             NavSection::LikedSongs => Some(LibrarySection::LikedSongs),
             NavSection::RecentlyPlayed => Some(LibrarySection::RecentlyPlayed),
             NavSection::Playlists => Some(LibrarySection::Playlists),
-            NavSection::Settings => None,
         }
     }
 
@@ -44,7 +42,6 @@ impl NavSection {
             NavSection::LikedSongs => icons::STAR,
             NavSection::RecentlyPlayed => icons::CLOCK_CIRCLE,
             NavSection::Playlists => icons::LIST,
-            NavSection::Settings => icons::SETTINGS_MINIMALISTIC,
         }
     }
 
@@ -54,7 +51,6 @@ impl NavSection {
             NavSection::LikedSongs => "Liked songs",
             NavSection::RecentlyPlayed => "Recently played",
             NavSection::Playlists => "Playlists",
-            NavSection::Settings => "Settings",
         }
     }
 }
@@ -66,7 +62,7 @@ const NAV_ITEMS: [NavSection; 4] = [
     NavSection::Playlists,
 ];
 
-/// The sidebar column: nav rows on top, Settings pinned to the bottom.
+/// The sidebar column of nav rows.
 pub(crate) fn render_sidebar(app: &PlayerApp, cx: &mut Context<PlayerApp>) -> impl IntoElement {
     div()
         .w(px(SIDEBAR_WIDTH))
@@ -87,8 +83,6 @@ pub(crate) fn render_sidebar(app: &PlayerApp, cx: &mut Context<PlayerApp>) -> im
                 .gap(px(2.0))
                 .children(NAV_ITEMS.map(|section| nav_row(section, app.nav, cx))),
         )
-        .child(div().flex_1())
-        .child(nav_row(NavSection::Settings, app.nav, cx))
 }
 
 /// One nav row — Comet's recipe: selected rows wear the wash and medium

@@ -61,3 +61,11 @@ dependency.
 Measurement gate: release-build idle CPU ~0.48% (was 1.0-2.4% before the
 morph), debug-build idle ~0.5-1.1% depending on network retries in-window.
 Log evidence shows idle windows with zero snapshot publications.
+
+## Clarification (30 September 2026)
+
+The window does not use `request_animation_frame()`. A frame-rate repaint loop
+pegs the GPU on high-refresh displays, so visible position is projected on
+timers instead: the progress bar every 100 ms while the window is focused and
+every 500 ms in the background, the clock once a second, and nothing at all
+while playback is paused, pending, or on Remote Playback.

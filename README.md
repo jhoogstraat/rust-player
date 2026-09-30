@@ -20,7 +20,7 @@ to listen.
 - `apps/player` — the native GPUI application.
 - `crates/player-core` — source-neutral commands, snapshots, runtime contract, and fake runtime.
 - `crates/player-spotatui` — adapter from that contract to the embedded playback engine.
-- `docs/` — implementation decisions, smoke test, and supporting research.
+- `docs/` — architecture decisions, the smoke test, and the performance baseline.
 
 ## Requirements
 
@@ -72,6 +72,5 @@ See [the manual smoke test](docs/SMOKE_TEST.md) before shipping a release.
 
 ## More context
 
-[Implementation plan](docs/IMPLEMENTATION_PLAN.md) documents the product and
-architecture decisions. [CONTEXT.md](CONTEXT.md) defines the project's domain
-language.
+[CONTEXT.md](CONTEXT.md) defines the project's domain language, and
+[docs/adr/](docs/adr/) records the architecture decisions.

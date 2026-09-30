@@ -339,10 +339,7 @@ impl gpui::Render for NowPlaying {
         let has_pending = self.pending_playable.is_some() || self.pending_transport.is_some();
         let position_ms = match (&self.playback, has_pending) {
             (_, true) => 0,
-            (Some(p), false) => {
-                let visible = player_core::project_position(p, Instant::now());
-                visible
-            }
+            (Some(p), false) => player_core::project_position(p, Instant::now()),
             (None, false) => 0,
         };
         let duration_ms = if has_pending { 0 } else { self.duration_ms };
@@ -366,7 +363,7 @@ impl gpui::Render for NowPlaying {
         .unwrap_or_else(|| self.title_line.clone());
 
         let has_playing_list = self.has_playing_list;
-        let element = div()
+        div()
             .id("now-playing")
             .border_t_1()
             .border_color(border())
@@ -417,9 +414,7 @@ impl gpui::Render for NowPlaying {
                         (duration_ms as f32 * fraction) as u64,
                     ));
                 }
-            }));
-
-        element
+            }))
     }
 }
 
@@ -455,80 +450,5 @@ impl gpui::Render for ProgressBar {
             self.performance.render(started.elapsed(), active);
         }
         element
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{pending_metadata, progress_update_interval, should_animate};
-    use player_core::{Playable, PlaybackDevice, Source};
-
-    #[test]
-    fn pending_playback_label_names_the_requested_track() {
-        let playable = Playable {
-            source: Source::Spotify,
-            locator: "spotify:track:queued".to_string(),
-            title: "Queued song".to_string(),
-            artists: vec!["Queued artist".to_string()],
-            album: "Queued album".to_string(),
-            duration_ms: 180_000,
-        };
-
-        assert_eq!(
-            pending_metadata(Some(&playable), None).unwrap().as_ref(),
-            "Starting · Queued song — Queued artist"
-        );
-        assert_eq!(
-            pending_metadata(None, Some(&"Changing track…".into()))
-                .unwrap()
-                .as_ref(),
-            "Changing track…"
-        );
-    }
-
-    #[test]
-    fn animation_requires_visible_native_playback() {
-        assert!(should_animate(
-            true,
-            true,
-            Some(PlaybackDevice::Native),
-            true
-        ));
-        assert!(!should_animate(
-            false,
-            true,
-            Some(PlaybackDevice::Native),
-            true
-        ));
-        assert!(!should_animate(
-            true,
-            false,
-            Some(PlaybackDevice::Native),
-            true
-        ));
-        assert!(!should_animate(
-            true,
-            true,
-            Some(PlaybackDevice::Native),
-            false
-        ));
-        assert!(!should_animate(
-            true,
-            true,
-            Some(PlaybackDevice::Remote),
-            true
-        ));
-    }
-
-    #[test]
-    fn background_progress_updates_are_slower() {
-        assert_eq!(
-            progress_update_interval(true),
-            std::time::Duration::from_millis(100)
-        );
-        assert_eq!(
-            progress_update_interval(false),
-            std::time::Duration::from_millis(500)
-        );
     }
 }

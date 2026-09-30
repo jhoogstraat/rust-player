@@ -85,7 +85,7 @@ fi
 echo "==> notices"
 cat > "$CONTENTS/Resources/LICENSES.txt" <<'NOTICES'
 Rust Player
-- GPUI (Apache-2.0) — https://github.com/wingleeio/zed
+- GPUI (Apache-2.0) — https://github.com/zed-industries/zed
 - Spotatui fork & librespot stack (MIT/Apache-2.0) — see the fork repository
 - PortAudio (MIT) — https://github.com/PortAudio/portaudio
 NOTICES

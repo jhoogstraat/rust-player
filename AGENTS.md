@@ -1,6 +1,6 @@
 # rust-player
 
-rust-player is a minimal GUI music player. A rust GPUI frontend for interacting with different streaming services, like spotify via dedicated creates.
+rust-player is a minimal GUI music player. A rust GPUI frontend for interacting with different streaming services, like spotify via dedicated crates.
 
 ## What makes rust-player special?
 
@@ -14,9 +14,9 @@ rust-player is truly open. We share our roadmap, we share how we think about thi
 
 Lots of apps have gotten bogged down with bad tech decisions and "slop". We have not, and we're proud of the performance of rust-player. We regularly audit for performance regressions, often caused by unnecessary redraws of the gui, lists being hard to render, and more. Make sure all changes are considerate of performance impact.
 
-### 4. Multi-platform
+### 3. Multi-platform
 
-rust-player is multi platform: **MacOS**, **Windows**, and **Linux**. While we support all three, MacOS the the primary platform and development environment.
+rust-player is multi platform: **MacOS**, **Windows**, and **Linux**. While we support all three, MacOS is the primary platform and development environment.
 
 ## A note from Joshua
 
@@ -35,16 +35,11 @@ We need to be on the same page with terminology. When communicating, use this la
 - **user** means the person using rust-player to listen to music.
 - **integration, provider, adapter** means the streaming service library rust-player uses, spotatui for spotify.
 - **client** means the gui application.
-- **project** means an environment-local workspace record rooted at a directory.
-
-## Hit every surface
-
-The most common defect in this repo is a change that works on the path you tested and is missing everywhere else. Before calling frontend work done, walk this list and say which entries applied:
 
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
-- Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
+- Conventional commit titles, plain language: `fix(ui): paused playback no longer repaints`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
 - UI changes need before/after images. Motion or timing needs a short video.
 - Upload PR evidence to GitHub. Never commit PR-only screenshots or assets such as `.github/pr-assets/`.
@@ -53,9 +48,9 @@ The most common defect in this repo is a change that works on the path you teste
 
 ## Plans and work artifacts
 
-- Do not commit implementation plans, research notes, or agent scratch files. Keep temporary working material outside the worktree. `.plans/` is gitignored only as a safety net for legacy tooling.
-- Track active maintainer work in the GitHub issue or project item that owns it. External proposals follow `CONTRIBUTING.md` and belong in Ideas discussions.
-- Put durable architecture, constraints, and decisions in `docs/internals/`. Update those docs when the product changes so agents find current facts instead of abandoned intentions.
+- Do not commit implementation plans, research notes, or agent scratch files. Keep temporary working material outside the worktree.
+- Track active maintainer work in the GitHub issue or project item that owns it.
+- Put durable architecture, constraints, and decisions in `CONTEXT.md` and `docs/adr/`. Update those docs when the product changes so agents find current facts instead of abandoned intentions.
 - A merged PR is the implementation record. Close or update its tracking item when the work lands; do not preserve a second checklist in the repository.
 
 ## Taste

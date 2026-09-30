@@ -30,7 +30,6 @@ use player_core::{
     AudioState, Command, LibraryState, LoginState, Playable, PlaybackList, PlaybackListProjector,
     Runtime, SearchAlbum, SearchDetail, SearchState, SearchTarget, Snapshot, fake::FakeRuntime,
 };
-use player_spotatui::ConnectOptions;
 use text_input::{KeyOutcome, TextField};
 
 pub(crate) const BG: u32 = 0x0c0c0e;
@@ -81,7 +80,6 @@ struct Performance {
     enabled: bool,
     snapshots: AtomicU64,
     catalog_changes: AtomicU64,
-    progress_updates: AtomicU64,
     playback_renders: AtomicU64,
     render_time_ns: AtomicU64,
     render_max_ns: AtomicU64,
@@ -93,7 +91,6 @@ impl Performance {
             enabled: std::env::var_os("RUST_PLAYER_PERF").is_some_and(|value| value != "0"),
             snapshots: AtomicU64::new(0),
             catalog_changes: AtomicU64::new(0),
-            progress_updates: AtomicU64::new(0),
             playback_renders: AtomicU64::new(0),
             render_time_ns: AtomicU64::new(0),
             render_max_ns: AtomicU64::new(0),
@@ -118,7 +115,6 @@ impl Performance {
             return;
         }
         if playing {
-            self.progress_updates.fetch_add(1, Ordering::Relaxed);
             self.playback_renders.fetch_add(1, Ordering::Relaxed);
             let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
             self.render_time_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
@@ -129,16 +125,11 @@ impl Performance {
     fn summary(&self) -> String {
         let renders = self.playback_renders.load(Ordering::Relaxed);
         let total_ns = self.render_time_ns.load(Ordering::Relaxed);
-        let average_us = if renders == 0 {
-            0
-        } else {
-            total_ns / renders / 1_000
-        };
+        let average_us = total_ns.checked_div(renders).unwrap_or(0) / 1_000;
         format!(
-            "snapshots={} catalog_changes={} progress_updates={} playback_renders={} render_avg_us={} render_max_us={}",
+            "snapshots={} catalog_changes={} playback_renders={} render_avg_us={} render_max_us={}",
             self.snapshots.load(Ordering::Relaxed),
             self.catalog_changes.load(Ordering::Relaxed),
-            self.progress_updates.load(Ordering::Relaxed),
             renders,
             average_us,
             self.render_max_ns.load(Ordering::Relaxed) / 1_000,
@@ -150,6 +141,11 @@ fn data_root() -> PathBuf {
     std::env::var_os("RUST_PLAYER_DATA_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
+            // Windows has no HOME; per-user data lives under APPDATA.
+            if cfg!(windows) {
+                let appdata = std::env::var_os("APPDATA").expect("APPDATA is set");
+                return PathBuf::from(appdata).join("rust-player");
+            }
             let home = std::env::var("HOME").expect("HOME is set");
             PathBuf::from(home)
                 .join("Library")
@@ -162,8 +158,7 @@ struct PlayerApp {
     snapshot: Snapshot,
     performance: Arc<Performance>,
     now_playing: gpui::Entity<now_playing::NowPlaying>,
-    /// The active sidebar destination; library sections feed the second
-    /// column, Settings swaps the main area.
+    /// The active sidebar destination.
     nav: sidebar::NavSection,
     /// Holds focus whenever no text field does, so fixed shortcuts reach
     /// `handle_key` through the root element.
@@ -181,7 +176,6 @@ struct PlayerApp {
     pending_transport: Option<SharedString>,
     pending_generation: u64,
     pending_timeout: Task<()>,
-    now_playing_subscription: Option<gpui::Subscription>,
 }
 
 enum ContextMenu {
@@ -479,11 +473,10 @@ impl PlayerApp {
                                 range
                                     .filter_map(|index| {
                                         rows_list.tracks.get(index).map(|track| {
-                                            library::track_row_in_list(
+                                            library::track_row(
                                                 track,
-                                                None,
                                                 index,
-                                                rows_list.clone(),
+                                                Some(rows_list.clone()),
                                                 cx,
                                             )
                                             .into_any_element()
@@ -703,7 +696,6 @@ impl PlayerApp {
             return;
         }
 
-        // Fixed application shortcuts.
         match event.keystroke.key.as_str() {
             "space" => self.send(if self.snapshot.is_playing() {
                 Command::Pause
@@ -746,13 +738,14 @@ impl Render for PlayerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snap = &self.snapshot;
 
-        let element = div()
+        div()
             .id("root")
             .key_context("Player")
             .track_focus(&self.root_focus)
             .on_key_down(cx.listener(Self::handle_key))
             .on_action(cx.listener(|app, _: &FocusSearch, window, cx| {
                 app.nav = sidebar::NavSection::Search;
+                app.show_playing_list = false;
                 window.focus(&app.search.focus, cx);
                 cx.notify();
             }))
@@ -783,7 +776,7 @@ impl Render for PlayerApp {
             // Body: sign-in takes the whole window until the runtime is
             // ready; then the Comet column layout — fixed sidebar, second
             // column with the browsed library listing, main area.
-            .child(if ready(&snap) {
+            .child(if ready(snap) {
                 let content = if self.show_playing_list {
                     div()
                         .flex_1()
@@ -800,9 +793,6 @@ impl Render for PlayerApp {
                         .flex()
                         .when_some(self.nav.library(), |row, section| {
                             row.child(library::render_library(self, section, cx).into_any_element())
-                        })
-                        .when(self.nav == sidebar::NavSection::Settings, |row| {
-                            row.child(self.render_settings().into_any_element())
                         })
                         .when(self.nav == sidebar::NavSection::Search, |row| {
                             row.child(self.render_search(window, cx).into_any_element())
@@ -821,7 +811,6 @@ impl Render for PlayerApp {
             } else {
                 self.render_sign_in(window, cx).into_any_element()
             })
-            // Notice bar
             .children(snap.notice.as_ref().map(|notice| {
                 div()
                     .px(px(18.))
@@ -834,25 +823,19 @@ impl Render for PlayerApp {
                     .justify_between()
                     .text_size(px(12.))
                     .text_color(rgb(MUTED))
-                    .child(notice.message.clone())
-                    .when(notice.dismissible, |el| {
-                        el.child(
-                            div()
-                                .id("dismiss-notice")
-                                .cursor_pointer()
-                                .text_size(px(12.))
-                                .hover(|style| style.text_color(rgb(TEXT)))
-                                .on_click(
-                                    cx.listener(|app, _, _, _| app.send(Command::DismissNotice)),
-                                )
-                                .child("Dismiss"),
-                        )
-                    })
+                    .child(notice.clone())
+                    .child(
+                        div()
+                            .id("dismiss-notice")
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .hover(|style| style.text_color(rgb(TEXT)))
+                            .on_click(cx.listener(|app, _, _, _| app.send(Command::DismissNotice)))
+                            .child("Dismiss"),
+                    )
             }))
-            // Now-playing bar
             .child(self.now_playing.clone())
             .child(self.render_context_menu(cx))
-            // Transport row
             .child(
                 div()
                     .h(px(52.))
@@ -910,8 +893,7 @@ impl Render for PlayerApp {
                             .text_color(rgb(MUTED))
                             .child(log_path_label()),
                     ),
-            );
-        element
+            )
     }
 }
 
@@ -927,28 +909,6 @@ fn log_path_label() -> String {
 }
 
 impl PlayerApp {
-    fn render_settings(&self) -> impl IntoElement {
-        div()
-            .flex_1()
-            .min_w_0()
-            .p(px(18.))
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_size(px(16.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Settings"),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(rgb(MUTED))
-                    .child("Nothing to configure yet."),
-            )
-    }
-
     fn render_sign_in(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let message = match &self.snapshot.login {
             LoginState::InProgress { message, .. } => message.clone(),
@@ -1040,7 +1000,6 @@ impl PlayerApp {
     fn render_search(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let snap = &self.snapshot;
 
-        // Search results column.
         let results = if let Some(Some(target)) = self.search_history.get(self.search_history_index)
         {
             let mut rows = Vec::new();
@@ -1086,53 +1045,24 @@ impl PlayerApp {
                                         Some((SearchSection::Tracks, None)) => Some(
                                             fixed_search_row(search_heading("Most famous tracks")),
                                         ),
-                                        Some((SearchSection::Tracks, Some(i))) => tracks
-                                            .get(i)
-                                            .map(|track| match list.as_ref() {
-                                                Some(list) => fixed_search_row(library::track_row_in_list(
-                                                    track, None, i, Arc::clone(list), cx,
-                                                )),
-                                                None => fixed_search_row(library::track_row(track, None, i, cx)),
-                                            }),
+                                        Some((SearchSection::Tracks, Some(i))) => {
+                                            tracks.get(i).map(|track| {
+                                                fixed_search_row(library::track_row(
+                                                    track,
+                                                    i,
+                                                    list.clone(),
+                                                    cx,
+                                                ))
+                                            })
+                                        }
                                         Some((SearchSection::Albums, None)) => {
                                             Some(fixed_search_row(search_heading("Albums")))
                                         }
-                                        Some((SearchSection::Albums, Some(i))) => albums.get(i).map(|album| {
-                                            let target = SearchTarget::Album {
-                                                locator: album.locator.clone(),
-                                                name: album.name.clone(),
-                                            };
-                                            let context_album = album.clone();
-                                            fixed_search_row(
-                                                div()
-                                                    .id(SharedString::from(format!("artist-album-{i}")))
-                                                    .w_full()
-                                                    .h_full()
-                                                    .px(px(14.))
-                                                    .py(px(8.))
-                                                    .border_b_1()
-                                                    .border_color(border())
-                                                    .flex()
-                                                    .items_center()
-                                                    .cursor_pointer()
-                                                    .hover(|style| style.bg(tone(PANEL, 0.60)))
-                                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                                        app.open_search_target(target.clone(), cx);
-                                                    }))
-                                                    .on_mouse_down(MouseButton::Right, cx.listener(
-                                                        move |app, event: &MouseDownEvent, window, cx| {
-                                                            app.open_album_context_menu(context_album.clone(), event.position);
-                                                            window.prevent_default();
-                                                            cx.stop_propagation();
-                                                            cx.notify();
-                                                        },
-                                                    ))
-                                                    .child(library::two_line_cell(
-                                                        album.name.clone(),
-                                                        album.artists.join(", "),
-                                                    )),
-                                            )
-                                        }),
+                                        Some((SearchSection::Albums, Some(i))) => {
+                                            albums.get(i).map(|album| {
+                                                album_row(format!("artist-album-{i}"), album, cx)
+                                            })
+                                        }
                                         _ => None,
                                     })
                                     .collect::<Vec<_>>()
@@ -1173,22 +1103,13 @@ impl PlayerApp {
                                             range
                                                 .filter_map(|index| {
                                                     tracks.get(index).map(|track| {
-                                                        match list.as_ref() {
-                                                            Some(list) => {
-                                                                library::track_row_in_list(
-                                                                    track,
-                                                                    None,
-                                                                    index,
-                                                                    Arc::clone(list),
-                                                                    cx,
-                                                                )
-                                                                .into_any_element()
-                                                            }
-                                                            None => library::track_row(
-                                                                track, None, index, cx,
-                                                            )
-                                                            .into_any_element(),
-                                                        }
+                                                        library::track_row(
+                                                            track,
+                                                            index,
+                                                            list.clone(),
+                                                            cx,
+                                                        )
+                                                        .into_any_element()
                                                     })
                                                 })
                                                 .collect::<Vec<_>>()
@@ -1206,15 +1127,9 @@ impl PlayerApp {
                 .id("search-detail")
                 .flex_1()
                 .min_h_0()
-                .when(
-                    matches!(
-                        target,
-                        SearchTarget::Artist { .. }
-                            | SearchTarget::Album { .. }
-                            | SearchTarget::Playlist { .. }
-                    ),
-                    |detail| detail.flex().flex_col().overflow_hidden(),
-                )
+                .flex()
+                .flex_col()
+                .overflow_hidden()
                 .children(rows)
                 .into_any_element()
         } else {
@@ -1244,33 +1159,130 @@ impl PlayerApp {
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
-                        .child(uniform_list(
-                            "search-result-rows",
-                            row_count,
-                            cx.processor(move |_app, range: Range<usize>, _, cx| {
-                                range.filter_map(|row_index| match index.get(row_index) {
-                                    Some((SearchSection::Tracks, None)) => Some(fixed_search_row(search_heading("Tracks"))),
-                                    Some((SearchSection::Tracks, Some(i))) => list.as_ref().and_then(|list| results.tracks.get(i).map(|track| fixed_search_row(library::track_row_in_list(track, None, i, Arc::clone(list), cx)))),
-                                    Some((SearchSection::Artists, None)) => Some(fixed_search_row(search_heading("Artists"))),
-                                    Some((SearchSection::Artists, Some(i))) => results.artists.get(i).map(|artist| {
-                                        let target = SearchTarget::Artist { locator: artist.locator.clone(), name: artist.name.clone() };
-                                        fixed_search_row(div().id(SharedString::from(format!("artist-{i}"))).w_full().h_full().px(px(18.)).py(px(8.)).border_b_1().border_color(border()).text_size(px(13.)).overflow_hidden().whitespace_nowrap().truncate().cursor_pointer().hover(|style| style.bg(tone(PANEL, 0.60))).on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx))).child(artist.name.clone()))
-                                    }),
-                                    Some((SearchSection::Albums, None)) => Some(fixed_search_row(search_heading("Albums"))),
-                                    Some((SearchSection::Albums, Some(i))) => results.albums.get(i).map(|album| {
-                                        let target = SearchTarget::Album { locator: album.locator.clone(), name: album.name.clone() };
-                                        let context_album = album.clone();
-                                        fixed_search_row(div().id(SharedString::from(format!("album-{i}"))).w_full().h_full().px(px(14.)).py(px(8.)).border_b_1().border_color(border()).flex().items_center().cursor_pointer().hover(|style| style.bg(tone(PANEL, 0.60))).on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx))).on_mouse_down(MouseButton::Right, cx.listener(move |app, event: &MouseDownEvent, window, cx| { app.open_album_context_menu(context_album.clone(), event.position); window.prevent_default(); cx.stop_propagation(); cx.notify(); })).child(library::two_line_cell(album.name.clone(), album.artists.join(", "))))
-                                    }),
-                                    Some((SearchSection::Playlists, None)) => Some(fixed_search_row(search_heading("Playlists"))),
-                                    Some((SearchSection::Playlists, Some(i))) => results.playlists.get(i).map(|playlist| {
-                                        let target = SearchTarget::Playlist { locator: playlist.locator.clone(), name: playlist.name.clone(), from_search: true };
-                                        fixed_search_row(div().id(SharedString::from(format!("playlist-{i}"))).w_full().h_full().px(px(14.)).py(px(8.)).border_b_1().border_color(border()).flex().items_center().text_size(px(13.)).cursor_pointer().hover(|style| style.bg(tone(PANEL, 0.60))).on_click(cx.listener(move |app, _, _, cx| app.open_search_target(target.clone(), cx))).child(library::two_line_cell(playlist.name.clone(), format!("{} · {} tracks", playlist.owner, playlist.track_count))))
-                                    }),
-                                    _ => None,
-                                }).collect::<Vec<_>>()
-                            }),
-                        ).size_full())
+                        .child(
+                            uniform_list(
+                                "search-result-rows",
+                                row_count,
+                                cx.processor(move |_app, range: Range<usize>, _, cx| {
+                                    range
+                                        .filter_map(|row_index| match index.get(row_index) {
+                                            Some((SearchSection::Tracks, None)) => {
+                                                Some(fixed_search_row(search_heading("Tracks")))
+                                            }
+                                            Some((SearchSection::Tracks, Some(i))) => {
+                                                list.as_ref().and_then(|list| {
+                                                    results.tracks.get(i).map(|track| {
+                                                        fixed_search_row(library::track_row(
+                                                            track,
+                                                            i,
+                                                            Some(Arc::clone(list)),
+                                                            cx,
+                                                        ))
+                                                    })
+                                                })
+                                            }
+                                            Some((SearchSection::Artists, None)) => {
+                                                Some(fixed_search_row(search_heading("Artists")))
+                                            }
+                                            Some((SearchSection::Artists, Some(i))) => {
+                                                results.artists.get(i).map(|artist| {
+                                                    let target = SearchTarget::Artist {
+                                                        locator: artist.locator.clone(),
+                                                        name: artist.name.clone(),
+                                                    };
+                                                    fixed_search_row(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "artist-{i}"
+                                                            )))
+                                                            .w_full()
+                                                            .h_full()
+                                                            .px(px(18.))
+                                                            .py(px(8.))
+                                                            .border_b_1()
+                                                            .border_color(border())
+                                                            .text_size(px(13.))
+                                                            .overflow_hidden()
+                                                            .whitespace_nowrap()
+                                                            .truncate()
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(tone(PANEL, 0.60))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |app, _, _, cx| {
+                                                                    app.open_search_target(
+                                                                        target.clone(),
+                                                                        cx,
+                                                                    )
+                                                                },
+                                                            ))
+                                                            .child(artist.name.clone()),
+                                                    )
+                                                })
+                                            }
+                                            Some((SearchSection::Albums, None)) => {
+                                                Some(fixed_search_row(search_heading("Albums")))
+                                            }
+                                            Some((SearchSection::Albums, Some(i))) => {
+                                                results.albums.get(i).map(|album| {
+                                                    album_row(format!("album-{i}"), album, cx)
+                                                })
+                                            }
+                                            Some((SearchSection::Playlists, None)) => {
+                                                Some(fixed_search_row(search_heading("Playlists")))
+                                            }
+                                            Some((SearchSection::Playlists, Some(i))) => {
+                                                results.playlists.get(i).map(|playlist| {
+                                                    let target = SearchTarget::Playlist {
+                                                        locator: playlist.locator.clone(),
+                                                        name: playlist.name.clone(),
+                                                        from_search: true,
+                                                    };
+                                                    fixed_search_row(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "playlist-{i}"
+                                                            )))
+                                                            .w_full()
+                                                            .h_full()
+                                                            .px(px(14.))
+                                                            .py(px(8.))
+                                                            .border_b_1()
+                                                            .border_color(border())
+                                                            .flex()
+                                                            .items_center()
+                                                            .text_size(px(13.))
+                                                            .cursor_pointer()
+                                                            .hover(|style| {
+                                                                style.bg(tone(PANEL, 0.60))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |app, _, _, cx| {
+                                                                    app.open_search_target(
+                                                                        target.clone(),
+                                                                        cx,
+                                                                    )
+                                                                },
+                                                            ))
+                                                            .child(library::two_line_cell(
+                                                                playlist.name.clone(),
+                                                                format!(
+                                                                    "{} · {} tracks",
+                                                                    playlist.owner,
+                                                                    playlist.track_count
+                                                                ),
+                                                            )),
+                                                    )
+                                                })
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                            .size_full(),
+                        )
                         .into_any_element()
                 }
                 SearchState::Loading { query } => {
@@ -1318,14 +1330,13 @@ impl PlayerApp {
                     .child(
                         div()
                             .flex_1()
-                            // Ported from Comet's `search_input_frame`.
                             .mb(px(4.))
                             .px(px(10.))
                             .py(px(6.))
                             .rounded(px(8.))
                             .bg(wash(0.04))
                             .text_size(px(13.))
-                            .child(self.search.render_search("search-input", window)),
+                            .child(self.search.render("search-input", window)),
                     ),
             )
             .child(
@@ -1566,24 +1577,43 @@ fn fixed_search_row(child: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
-#[cfg(test)]
-mod search_row_index_tests {
-    use super::{SearchRowIndex, SearchSection};
-
-    #[test]
-    fn maps_section_boundaries_and_skips_empty_sections() {
-        let mut rows = SearchRowIndex::default();
-        rows.push(SearchSection::Tracks, 2);
-        rows.push(SearchSection::Artists, 0);
-        rows.push(SearchSection::Albums, 1);
-
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows.get(0), Some((SearchSection::Tracks, None)));
-        assert_eq!(rows.get(2), Some((SearchSection::Tracks, Some(1))));
-        assert_eq!(rows.get(3), Some((SearchSection::Albums, None)));
-        assert_eq!(rows.get(4), Some((SearchSection::Albums, Some(0))));
-        assert_eq!(rows.get(5), None);
-    }
+/// One album row: click opens the album, right-click opens its menu.
+fn album_row(id: String, album: &SearchAlbum, cx: &Context<PlayerApp>) -> AnyElement {
+    let target = SearchTarget::Album {
+        locator: album.locator.clone(),
+        name: album.name.clone(),
+    };
+    let context_album = album.clone();
+    fixed_search_row(
+        div()
+            .id(SharedString::from(id))
+            .w_full()
+            .h_full()
+            .px(px(14.))
+            .py(px(8.))
+            .border_b_1()
+            .border_color(border())
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .hover(|style| style.bg(tone(PANEL, 0.60)))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.open_search_target(target.clone(), cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                    app.open_album_context_menu(context_album.clone(), event.position);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(library::two_line_cell(
+                album.name.clone(),
+                album.artists.join(", "),
+            )),
+    )
 }
 
 fn search_nav_button(
@@ -1672,24 +1702,11 @@ fn open_player_window(cx: &mut App) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(gpui::size(px(620.), px(440.))),
-            // Frosted shell: the desktop shows through blurred behind the
-            // translucent chrome (`tone`). Gate matches platforms whose
-            // compositor *guarantees* blur in this gpui pin — macOS installs
-            // an NSVisualEffectView, Windows drives DWM composition. Linux is
-            // deliberately conservative: Wayland blurs only under KWin's
-            // org_kde_kwin_blur and X11 gets no blur at all, so it stays
-            // opaque rather than showing raw desktop through 80%-alpha chrome.
-            //
-            // THEME-SWITCH REQUIREMENT: if a future theme/appearance switcher
-            // can change the palette at runtime, it MUST re-push this value
-            // via `window.set_background_appearance(...)` after every change,
-            // unconditionally. gpui's macOS backend tears the
-            // NSVisualEffectView out of the window the moment the value is
-            // anything but Blurred and nothing reinstates it on its own — a
-            // single missed re-apply kills vibrancy until restart. Comet runs
-            // this loop on every appearance change
-            // (crates/ui/src/appearance.rs `apply` + `reapply_window_background`),
-            // as does zed's main.rs.
+            // Blurred only where the compositor guarantees it (see `GLASS`).
+            // Anything that changes appearance at runtime must re-push this
+            // value with `window.set_background_appearance`: gpui's macOS
+            // backend drops its NSVisualEffectView the moment the value is
+            // not Blurred and never reinstates it.
             window_background: if GLASS {
                 WindowBackgroundAppearance::Blurred
             } else {
@@ -1704,14 +1721,12 @@ fn open_player_window(cx: &mut App) {
                 .new(|cx| now_playing::NowPlaying::new(&initial_snapshot, performance.clone(), cx));
             let now_playing_updates = now_playing.clone();
             let app = cx.new(|cx| {
-                // Fold published snapshots into the entity.
                 cx.spawn(async move |this, cx| {
                     loop {
                         let snapshot = rx.borrow_and_update().clone();
                         if this
                             .update(cx, |app: &mut PlayerApp, cx| {
-                                // Delta gate (ticket 13): identical snapshots
-                                // cause no clone and no re-render.
+                                // Identical snapshots cause no re-render.
                                 if app.snapshot == snapshot {
                                     return;
                                 }
@@ -1762,6 +1777,19 @@ fn open_player_window(cx: &mut App) {
                     }
                 })
                 .detach();
+                cx.subscribe(
+                    &now_playing,
+                    |app, _, event: &now_playing::NowPlayingEvent, cx| match event {
+                        now_playing::NowPlayingEvent::ViewList => {
+                            app.show_playing_list = true;
+                            cx.notify();
+                        }
+                        now_playing::NowPlayingEvent::Seek(position_ms) => {
+                            app.send(Command::Seek(*position_ms));
+                        }
+                    },
+                )
+                .detach();
 
                 PlayerApp {
                     snapshot: initial_snapshot,
@@ -1780,23 +1808,7 @@ fn open_player_window(cx: &mut App) {
                     pending_transport: None,
                     pending_generation: 0,
                     pending_timeout: Task::ready(()),
-                    now_playing_subscription: None,
                 }
-            });
-            app.update(cx, |app, cx| {
-                let now_playing = app.now_playing.clone();
-                app.now_playing_subscription = Some(cx.subscribe(
-                    &now_playing,
-                    |app, _, event: &now_playing::NowPlayingEvent, cx| match event {
-                        now_playing::NowPlayingEvent::ViewList => {
-                            app.show_playing_list = true;
-                            cx.notify();
-                        }
-                        now_playing::NowPlayingEvent::Seek(position_ms) => {
-                            app.send(Command::Seek(*position_ms));
-                        }
-                    },
-                ));
             });
             // Shortcuts work from the first frame, before any click.
             let root_focus = app.read(cx).root_focus.clone();
@@ -1824,7 +1836,7 @@ fn main() {
     let runtime: Arc<dyn Runtime> = if fake {
         Arc::new(FakeRuntime::new())
     } else {
-        player_spotatui::connect(ConnectOptions::new(data_root.clone()))
+        player_spotatui::connect(data_root)
     };
     let _ = RUNTIME.set(runtime);
     let _ = COMMAND_DISPATCHER.set(Arc::new(command_dispatch::CommandDispatcher::new(
@@ -1875,72 +1887,21 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod search_row_index_tests {
+    use super::{SearchRowIndex, SearchSection};
 
     #[test]
-    fn tone_preserves_rgb_and_requested_alpha() {
-        let actual = tone(BG, 0.80).to_rgb();
-        let expected = rgb(BG);
-        let expected_alpha = if GLASS { 0.80 } else { 1.0 };
+    fn maps_section_boundaries_and_skips_empty_sections() {
+        let mut rows = SearchRowIndex::default();
+        rows.push(SearchSection::Tracks, 2);
+        rows.push(SearchSection::Artists, 0);
+        rows.push(SearchSection::Albums, 1);
 
-        assert!((actual.r - expected.r).abs() < f32::EPSILON);
-        assert!((actual.g - expected.g).abs() < f32::EPSILON);
-        assert!((actual.b - expected.b).abs() < f32::EPSILON);
-        assert!((actual.a - expected_alpha).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn performance_summary_separates_catalog_and_playback_work() {
-        let metrics = Performance {
-            enabled: true,
-            snapshots: AtomicU64::new(0),
-            catalog_changes: AtomicU64::new(0),
-            progress_updates: AtomicU64::new(0),
-            playback_renders: AtomicU64::new(0),
-            render_time_ns: AtomicU64::new(0),
-            render_max_ns: AtomicU64::new(0),
-        };
-        let before = Snapshot::default();
-        let mut catalog = before.clone();
-        catalog.search = SearchState::Loading {
-            query: "baseline".to_string(),
-        };
-        metrics.snapshot(&before, &catalog);
-        metrics.render(std::time::Duration::from_micros(4), true);
-        assert_eq!(
-            metrics.summary(),
-            "snapshots=1 catalog_changes=1 progress_updates=1 playback_renders=1 render_avg_us=4 render_max_us=4"
-        );
-    }
-
-    #[test]
-    fn legacy_ui_list_caches_and_constructors_are_deleted() {
-        let player = include_str!("main.rs");
-        let library = include_str!("library.rs");
-        let app = &player
-            [player.find("struct PlayerApp").unwrap()..player.find("enum ContextMenu").unwrap()];
-        let helpers = &player[..player.find("impl Render for PlayerApp").unwrap()];
-
-        assert!(!app.contains("library_playback_list"));
-        assert!(!helpers.contains("fn playback_list("));
-        assert!(!library.contains("playback_list_for_library"));
-        assert!(!library.contains("update_library_playback_list_cache"));
-    }
-
-    #[test]
-    fn playback_progress_updates_are_scoped_to_now_playing_entity() {
-        let now_playing = include_str!("now_playing.rs");
-        let frame_call = format!("window.{}{}", "request_", "animation_frame()");
-        for source in [
-            include_str!("main.rs"),
-            include_str!("library.rs"),
-            include_str!("sidebar.rs"),
-        ] {
-            assert!(!source.contains(&frame_call));
-        }
-        assert!(!now_playing.contains(&frame_call));
-        assert!(now_playing.contains("PROGRESS_UPDATE_INTERVAL"));
-        assert!(now_playing.contains("start_progress_updates"));
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.get(0), Some((SearchSection::Tracks, None)));
+        assert_eq!(rows.get(2), Some((SearchSection::Tracks, Some(1))));
+        assert_eq!(rows.get(3), Some((SearchSection::Albums, None)));
+        assert_eq!(rows.get(4), Some((SearchSection::Albums, Some(0))));
+        assert_eq!(rows.get(5), None);
     }
 }

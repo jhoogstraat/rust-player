@@ -14,7 +14,7 @@ use player_core::{
     Command, LibraryEntry, LibrarySection, LibraryState, PlaybackList, SearchTarget,
 };
 
-use crate::{ACCENT, MUTED, PANEL, PlayerApp, border, rgb, tone};
+use crate::{ACCENT, MUTED, PANEL, PlayerApp, border, clock, rgb, tone};
 
 /// The listing never collapses below a readable table width.
 pub(crate) const LIBRARY_MIN_WIDTH: f32 = 300.0;
@@ -77,7 +77,6 @@ pub(crate) fn render_library(
         .overflow_hidden()
         .border_r_1()
         .border_color(border())
-        // Header
         .child(
             div()
                 .flex()
@@ -98,7 +97,6 @@ pub(crate) fn render_library(
                         .child(format!("{count} items"))
                 })),
         )
-        // Scrollable listing
         .child(
             div()
                 .id("library-list")
@@ -116,16 +114,9 @@ fn render_library_entry(
     cx: &Context<PlayerApp>,
 ) -> AnyElement {
     match entry {
-        LibraryEntry::Track {
-            playable,
-            played_at_ms,
-        } => playback_list.map_or_else(
-            || track_row(playable, *played_at_ms, index, cx).into_any_element(),
-            |list| {
-                track_row_in_list(playable, *played_at_ms, index, Arc::clone(list), cx)
-                    .into_any_element()
-            },
-        ),
+        LibraryEntry::Track { playable } => {
+            track_row(playable, index, playback_list.cloned(), cx).into_any_element()
+        }
         LibraryEntry::Playlist {
             id,
             name,
@@ -135,30 +126,10 @@ fn render_library_entry(
     }
 }
 
-/// One playable track row: click plays, the chip enqueues.
+/// One playable track row: click plays, the chip enqueues. With `list`,
+/// playing the row also installs that list as the implicit playback list.
 pub(crate) fn track_row(
     playable: &player_core::Playable,
-    played_at_ms: Option<u64>,
-    index: usize,
-    cx: &Context<PlayerApp>,
-) -> impl IntoElement {
-    track_row_with_list(playable, played_at_ms, index, None, cx)
-}
-
-/// One track row that replaces the implicit playback list when selected.
-pub(crate) fn track_row_in_list(
-    playable: &player_core::Playable,
-    played_at_ms: Option<u64>,
-    index: usize,
-    list: Arc<PlaybackList>,
-    cx: &Context<PlayerApp>,
-) -> impl IntoElement {
-    track_row_with_list(playable, played_at_ms, index, Some(list), cx)
-}
-
-fn track_row_with_list(
-    playable: &player_core::Playable,
-    played_at_ms: Option<u64>,
     index: usize,
     list: Option<Arc<PlaybackList>>,
     cx: &Context<PlayerApp>,
@@ -205,13 +176,6 @@ fn track_row_with_list(
             playable.title.clone(),
             format!("{} — {}", playable.artists_display(), playable.album),
         ))
-        .children(played_at_ms.map(|at| {
-            div()
-                .flex_none()
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(time_ago(at))
-        }))
         .child(
             div()
                 .flex_none()
@@ -321,31 +285,4 @@ fn status_row(text: String) -> impl IntoElement {
         .text_size(px(12.0))
         .text_color(rgb(MUTED))
         .child(text)
-}
-
-/// Coarse relative time for Recently played stamps.
-fn time_ago(unix_ms: u64) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let minutes_ago = now_ms.saturating_sub(unix_ms) / 60_000;
-    if minutes_ago < 2 {
-        "just now".to_string()
-    } else if minutes_ago < 60 {
-        format!("{minutes_ago}m ago")
-    } else if minutes_ago < 24 * 60 {
-        format!("{}h ago", minutes_ago / 60)
-    } else if minutes_ago < 7 * 24 * 60 {
-        format!("{}d ago", minutes_ago / (24 * 60))
-    } else {
-        format!("{}w ago", minutes_ago / (7 * 24 * 60))
-    }
-}
-
-/// `m:ss` (shared shape with the transport's clock; kept local so the
-/// column renders without reaching into layout code).
-fn clock(ms: u64) -> String {
-    let seconds = ms / 1000;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
 }

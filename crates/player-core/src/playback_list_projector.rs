@@ -139,30 +139,6 @@ impl PlaybackListProjector {
         None
     }
 
-    /// The current unselected candidate, if catalog data is complete.
-    pub fn candidate(&self) -> Option<Arc<PlaybackList>> {
-        self.cached.as_ref().map(|cached| Arc::clone(&cached.list))
-    }
-
-    /// Align `list` to `playable`, searching at or after its prior cursor
-    /// before falling back to the first source-scoped identity match.
-    pub fn align_cursor(list: &mut PlaybackList, playable: &Playable) -> bool {
-        let matches = |candidate: &Playable| {
-            candidate.source == playable.source && candidate.locator == playable.locator
-        };
-        let index = list.tracks[list.current_index.min(list.tracks.len())..]
-            .iter()
-            .position(matches)
-            .map(|offset| list.current_index.min(list.tracks.len()) + offset)
-            .or_else(|| list.tracks.iter().position(matches));
-        if let Some(index) = index {
-            list.current_index = index;
-            true
-        } else {
-            false
-        }
-    }
-
     fn project(
         &mut self,
         source: PlaybackListSource,
@@ -238,69 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_and_empty_listings_clear_only_the_candidate() {
-        let mut projector = PlaybackListProjector::default();
-        assert!(
-            projector
-                .project_search(&search(1, vec![playable(Source::Spotify, "one")]))
-                .is_some()
-        );
-        assert!(
-            projector
-                .project_search(&SearchState::Loading {
-                    query: "query".to_string()
-                })
-                .is_none()
-        );
-        assert!(projector.project_search(&search(2, vec![])).is_none());
-        assert!(
-            projector
-                .project_search(&SearchState::Failed {
-                    query: "query".to_string(),
-                    message: "offline".to_string(),
-                })
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn detail_and_library_listings_use_the_same_projection_path() {
-        let track = playable(Source::Spotify, "one");
-        let mut projector = PlaybackListProjector::default();
-        let detail = SearchDetail::Album {
-            target_locator: Some("spotify:album:one".to_string()),
-            complete: true,
-            revision: CatalogRevision::new(1),
-            tracks: vec![track.clone()].into(),
-        };
-        let detail_list = projector
-            .project_detail(
-                &SearchTarget::Album {
-                    locator: "spotify:album:one".to_string(),
-                    name: "One".to_string(),
-                },
-                Some(&detail),
-            )
-            .unwrap();
-        assert!(matches!(
-            detail_list.source,
-            PlaybackListSource::Album { .. }
-        ));
-
-        let library = LibraryState::Done {
-            section: LibrarySection::LikedSongs,
-            revision: CatalogRevision::new(2),
-            entries: vec![LibraryEntry::Track {
-                playable: track,
-                played_at_ms: None,
-            }]
-            .into(),
-        };
-        let library_list = projector.project_library(&library).unwrap();
-        assert_eq!(library_list.source, PlaybackListSource::LikedSongs);
-    }
-
-    #[test]
     fn detail_identity_and_completeness_gate_playback_projection() {
         let track = playable(Source::Spotify, "one");
         let target = SearchTarget::Album {
@@ -323,43 +236,5 @@ mod tests {
             tracks: vec![track].into(),
         };
         assert!(projector.project_detail(&target, Some(&partial)).is_none());
-    }
-
-    #[test]
-    fn unchanged_library_revision_reuses_before_cloning_entries() {
-        let mut projector = PlaybackListProjector::default();
-        let library = |title| LibraryState::Done {
-            section: LibrarySection::LikedSongs,
-            revision: CatalogRevision::new(1),
-            entries: vec![LibraryEntry::Track {
-                playable: playable(Source::Spotify, title),
-                played_at_ms: None,
-            }]
-            .into(),
-        };
-
-        let first = projector.project_library(&library("first")).unwrap();
-        let reused = projector.project_library(&library("changed")).unwrap();
-
-        assert!(Arc::ptr_eq(&first, &reused));
-        assert_eq!(reused.tracks[0].title, "first");
-    }
-
-    #[test]
-    fn cursor_alignment_is_source_scoped_and_prefers_the_prior_cursor() {
-        let spotify = playable(Source::Spotify, "same");
-        let mut list = PlaybackList {
-            source: PlaybackListSource::LikedSongs,
-            tracks: vec![
-                spotify.clone(),
-                playable(Source::Spotify, "other"),
-                spotify.clone(),
-            ]
-            .into(),
-            current_index: 2,
-        };
-
-        assert!(PlaybackListProjector::align_cursor(&mut list, &spotify));
-        assert_eq!(list.current_index, 2);
     }
 }

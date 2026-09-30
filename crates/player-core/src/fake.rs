@@ -2,24 +2,22 @@
 //! hardware. It answers every command the window can send, so UI behavior
 //! is exercisable end to end.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
 use crate::{
-    ActionOutcome, AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection,
-    LibraryState, LoginState, Playable, PlaybackDevice, PlaybackList, PlaybackListProjector,
-    PlaybackStatus, SearchAlbum, SearchArtist, SearchPlaylist, SearchResults, SearchState,
-    Snapshot,
+    AudioState, CatalogRevision, Command, LibraryEntry, LibrarySection, LibraryState, LoginState,
+    Playable, PlaybackDevice, PlaybackStatus, SearchAlbum, SearchArtist, SearchPlaylist,
+    SearchResults, SearchState, Snapshot,
 };
 
 /// How long a scripted search stays in `Loading` so the state is visible.
 const SEARCH_DELAY: Duration = Duration::from_millis(150);
-type CommandReply = mpsc::Sender<Option<ActionOutcome>>;
-type CommandRequest = (Command, CommandReply);
+/// A command and the channel that acknowledges it; dropping the channel
+/// rejects the command.
+type CommandRequest = (Command, mpsc::Sender<()>);
 
 fn canned_track(name: &str, artist: &str, album: &str, duration_ms: u64, id: &str) -> Playable {
     Playable {
@@ -77,12 +75,6 @@ fn canned_results() -> SearchResults {
 
 /// Canned rows per library section; the scripted library is static.
 fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
-    // "Recently played" rows carry real Unix-millis stamps so relative-time
-    // rendering has something truthful to chew on.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
     match section {
         LibrarySection::LikedSongs => canned_tracks()
             .iter()
@@ -103,19 +95,11 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
                     "3nL9wCcKvOo7VpQ0fake02",
                 ),
             ])
-            .map(|playable| LibraryEntry::Track {
-                playable,
-                played_at_ms: None,
-            })
+            .map(|playable| LibraryEntry::Track { playable })
             .collect(),
         LibrarySection::RecentlyPlayed => canned_tracks()
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, playable)| LibraryEntry::Track {
-                played_at_ms: Some(now_ms.saturating_sub((i as u64 + 1) * 3_600_000)),
-                playable,
-            })
+            .into_iter()
+            .map(|playable| LibraryEntry::Track { playable })
             .collect(),
         LibrarySection::Playlists => vec![
             LibraryEntry::Playlist {
@@ -137,53 +121,30 @@ fn canned_library(section: LibrarySection) -> Vec<LibraryEntry> {
     }
 }
 
-/// The scripted fake. Commands mutate a plain state struct on one worker
-/// thread and republish; a search shows `Loading` for [`SEARCH_DELAY`]
-/// before resolving to canned results.
+/// The scripted fake. One worker thread folds commands into the published
+/// snapshot; a search or browse shows `Loading` for [`SEARCH_DELAY`] before
+/// resolving to canned rows.
 pub struct FakeRuntime {
     tx: watch::Sender<Snapshot>,
     commands: Mutex<Option<mpsc::Sender<CommandRequest>>>,
-    state: Arc<Mutex<Snapshot>>,
-    projector: Arc<Mutex<PlaybackListProjector>>,
-    stop: Arc<AtomicBool>,
 }
 
 impl FakeRuntime {
     pub fn new() -> Self {
         // Land in Ready immediately: the fake has no sign-in step.
-        let initial = Snapshot {
+        let (tx, _rx) = watch::channel(Snapshot {
             login: LoginState::Ready,
             audio: AudioState::Ready,
             ..Snapshot::default()
-        };
-        let (tx, _rx) = watch::channel(initial.clone());
+        });
         let (commands, command_rx) = mpsc::channel::<CommandRequest>();
-        let state = Arc::new(Mutex::new(initial));
-        let projector = Arc::new(Mutex::new(PlaybackListProjector::default()));
-        let next_revision = Arc::new(AtomicU64::new(1));
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let worker_state = Arc::clone(&state);
         let worker_tx = tx.clone();
-        let worker_stop = Arc::clone(&stop);
-        let worker_projector = Arc::clone(&projector);
-        let worker_revision = Arc::clone(&next_revision);
         std::thread::Builder::new()
             .name("player-fake-runtime".into())
             .spawn(move || {
-                while !worker_stop.load(Ordering::Relaxed) {
-                    match command_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok((command, reply)) => apply(
-                            &worker_state,
-                            &worker_tx,
-                            &worker_projector,
-                            &worker_revision,
-                            command,
-                            reply,
-                        ),
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
+                let mut next_revision = 1;
+                for (command, reply) in command_rx {
+                    apply(&worker_tx, &mut next_revision, command, reply);
                 }
             })
             .expect("spawn fake runtime thread");
@@ -191,36 +152,7 @@ impl FakeRuntime {
         FakeRuntime {
             tx,
             commands: Mutex::new(Some(commands)),
-            state,
-            projector,
-            stop,
         }
-    }
-
-    /// Force one exact snapshot (scripted scenarios for failure states).
-    pub fn script_snapshot(&self, snapshot: Snapshot) {
-        let mut projector = self.projector.lock().unwrap();
-        if matches!(
-            snapshot.search,
-            SearchState::Loading { .. } | SearchState::Failed { .. }
-        ) || matches!(
-            snapshot.library,
-            LibraryState::Loading { .. } | LibraryState::Failed { .. }
-        ) {
-            projector.clear();
-        } else if matches!(snapshot.search, SearchState::Done { .. }) {
-            projector.project_search(&snapshot.search);
-        } else if matches!(snapshot.library, LibraryState::Done { .. }) {
-            projector.project_library(&snapshot.library);
-        }
-        drop(projector);
-        *self.state.lock().unwrap() = snapshot;
-        publish(&self.state, &self.tx);
-    }
-
-    /// The completed catalog candidate held by the fake's projector.
-    pub fn candidate_list(&self) -> Option<Arc<PlaybackList>> {
-        self.projector.lock().unwrap().candidate()
     }
 }
 
@@ -230,116 +162,96 @@ impl Default for FakeRuntime {
     }
 }
 
+/// Publish only when `change` actually changed the snapshot.
+fn update(tx: &watch::Sender<Snapshot>, change: impl FnOnce(&mut Snapshot)) {
+    tx.send_if_modified(|snapshot| {
+        let before = snapshot.clone();
+        change(snapshot);
+        *snapshot != before
+    });
+}
+
 fn apply(
-    state: &Mutex<Snapshot>,
     tx: &watch::Sender<Snapshot>,
-    projector: &Mutex<PlaybackListProjector>,
-    next_revision: &AtomicU64,
+    next_revision: &mut u64,
     command: Command,
-    reply: mpsc::Sender<Option<ActionOutcome>>,
+    reply: mpsc::Sender<()>,
 ) {
-    if let Command::Search(query) = command {
-        projector.lock().unwrap().clear();
-        state.lock().unwrap().search = SearchState::Loading {
-            query: query.clone(),
-        };
-        publish(state, tx);
-        // A command is acknowledged once its loading fact is folded. The
-        // eventual Done fact is an independent worker completion.
-        let _ = reply.send(Some(ActionOutcome::Applied));
-        std::thread::sleep(SEARCH_DELAY);
-        let needle = query.to_lowercase();
-        let results: Vec<Playable> = canned_results()
-            .tracks
-            .iter()
-            .cloned()
-            .filter(|p| {
-                needle.is_empty()
-                    || p.title.to_lowercase().contains(&needle)
-                    || p.artists_display().to_lowercase().contains(&needle)
-            })
-            .collect();
-        let results = if results.is_empty() {
-            SearchResults::default()
-        } else {
-            SearchResults {
-                tracks: results.into(),
-                ..canned_results()
-            }
-        };
-        let done = SearchState::Done {
-            query,
-            revision: CatalogRevision::new(next_revision.fetch_add(1, Ordering::Relaxed)),
-            results,
-        };
-        projector.lock().unwrap().project_search(&done);
-        state.lock().unwrap().search = done;
-        publish(state, tx);
-        return;
-    }
-
-    if let Command::Browse(section) = command {
-        projector.lock().unwrap().clear();
-        state.lock().unwrap().library = LibraryState::Loading { section };
-        publish(state, tx);
-        let _ = reply.send(Some(ActionOutcome::Applied));
-        std::thread::sleep(SEARCH_DELAY);
-        let done = LibraryState::Done {
-            section,
-            revision: CatalogRevision::new(next_revision.fetch_add(1, Ordering::Relaxed)),
-            entries: canned_library(section).into(),
-        };
-        projector.lock().unwrap().project_library(&done);
-        state.lock().unwrap().library = done;
-        publish(state, tx);
-        return;
-    }
-
-    let mut snap = state.lock().unwrap();
-    let accepted = !matches!(&command, Command::PlayFromList { list, index }
-        if list.tracks.is_empty() || *index >= list.tracks.len());
-    let auth_accepted = match &command {
-        Command::SubmitPastedLoginUrl(_) => matches!(
-            &snap.login,
-            LoginState::InProgress {
-                wants_pasted_url: true,
-                ..
-            }
-        ),
-        Command::Reauthenticate => {
-            matches!(&snap.login, LoginState::Ready | LoginState::Expired { .. })
-        }
-        _ => true,
+    let mut revision = || {
+        *next_revision += 1;
+        CatalogRevision::new(*next_revision - 1)
     };
-    let queue_accepted = match &command {
-        Command::Enqueue(playable) => !playable.locator.starts_with("radio:"),
-        _ => true,
-    };
-    if !accepted || !auth_accepted {
-        let _ = reply.send(None);
-        return;
-    }
-    let preboot_retry = matches!(
-        (&command, &snap.login),
-        (Command::Reauthenticate, LoginState::Expired { .. })
-    );
-    let enqueue = matches!(&command, Command::Enqueue(_));
     match command {
-        Command::Search(_) | Command::Browse(_) => unreachable!("handled above"),
-        Command::OpenSearchTarget(_) => {}
-        Command::SubmitPastedLoginUrl(_) | Command::Reauthenticate => {
-            snap.login = LoginState::Ready;
+        Command::Search(query) => {
+            update(tx, |snap| {
+                snap.search = SearchState::Loading {
+                    query: query.clone(),
+                }
+            });
+            // A command is acknowledged once its loading fact is folded. The
+            // eventual Done fact is an independent worker completion.
+            let _ = reply.send(());
+            std::thread::sleep(SEARCH_DELAY);
+            let needle = query.to_lowercase();
+            let tracks: Vec<Playable> = canned_tracks()
+                .into_iter()
+                .filter(|p| {
+                    needle.is_empty()
+                        || p.title.to_lowercase().contains(&needle)
+                        || p.artists_display().to_lowercase().contains(&needle)
+                })
+                .collect();
+            let results = if tracks.is_empty() {
+                SearchResults::default()
+            } else {
+                SearchResults {
+                    tracks: tracks.into(),
+                    ..canned_results()
+                }
+            };
+            let done = SearchState::Done {
+                query,
+                revision: revision(),
+                results,
+            };
+            update(tx, |snap| snap.search = done);
         }
+        Command::Browse(section) => {
+            update(tx, |snap| snap.library = LibraryState::Loading { section });
+            let _ = reply.send(());
+            std::thread::sleep(SEARCH_DELAY);
+            let done = LibraryState::Done {
+                section,
+                revision: revision(),
+                entries: canned_library(section).into(),
+            };
+            update(tx, |snap| snap.library = done);
+        }
+        Command::PlayFromList { ref list, index } if index >= list.tracks.len() => {}
+        command => {
+            update(tx, |snap| fold(snap, command));
+            let _ = reply.send(());
+        }
+    }
+}
+
+fn fold(snap: &mut Snapshot, command: Command) {
+    match command {
+        Command::Search(_)
+        | Command::Browse(_)
+        | Command::OpenSearchTarget(_)
+        | Command::SubmitPastedLoginUrl(_)
+        | Command::Reauthenticate => {}
         Command::Play(playable) => {
             snap.implicit_queue = None;
-            start_playback(&mut snap, playable);
+            start_playback(snap, playable);
         }
         Command::PlayFromList { list, index } => {
             let mut list = (*list).clone();
             if let Some(playable) = list.tracks.get(index).cloned() {
                 list.current_index = index;
                 snap.implicit_queue = Some(list);
-                start_playback(&mut snap, playable);
+                start_playback(snap, playable);
             }
         }
         Command::Pause => {
@@ -364,9 +276,9 @@ fn apply(
         Command::Next => {
             if !snap.queue.is_empty() {
                 let next = snap.queue.remove(0);
-                start_playback(&mut snap, next);
-            } else if let Some(next) = advance_implicit_queue(&mut snap) {
-                start_playback(&mut snap, next);
+                start_playback(snap, next);
+            } else if let Some(next) = advance_implicit_queue(snap) {
+                start_playback(snap, next);
             }
         }
         Command::Previous => {
@@ -376,7 +288,7 @@ fn apply(
                 list.tracks.get(previous_index).cloned()
             });
             if let Some(previous) = previous {
-                start_playback(&mut snap, previous);
+                start_playback(snap, previous);
             } else if let Some(p) = snap.playback.as_mut() {
                 p.position_ms = 0;
                 p.observed_at = Instant::now();
@@ -387,8 +299,7 @@ fn apply(
                 p.volume_percent = Some(percent.min(100));
             }
         }
-        Command::Enqueue(playable) if queue_accepted => snap.queue.push(playable),
-        Command::Enqueue(_) => {}
+        Command::Enqueue(playable) => snap.queue.push(playable),
         Command::RemoveQueued(index) => {
             if index < snap.queue.len() {
                 snap.queue.remove(index);
@@ -405,18 +316,6 @@ fn apply(
         Command::ClearQueue => snap.queue.clear(),
         Command::DismissNotice => snap.notice = None,
     }
-    drop(snap);
-    publish(state, tx);
-    let outcome = if preboot_retry {
-        ActionOutcome::Accepted
-    } else if enqueue {
-        ActionOutcome::Queued {
-            accepted: usize::from(queue_accepted),
-        }
-    } else {
-        ActionOutcome::Applied
-    };
-    let _ = reply.send(Some(outcome));
 }
 
 fn start_playback(snapshot: &mut Snapshot, playable: Playable) {
@@ -443,34 +342,24 @@ fn advance_implicit_queue(snapshot: &mut Snapshot) -> Option<Playable> {
     Some(next)
 }
 
-fn publish(state: &Mutex<Snapshot>, tx: &watch::Sender<Snapshot>) {
-    let snapshot = state.lock().unwrap().clone();
-    tx.send_if_modified(|current| {
-        if *current == snapshot {
-            false
-        } else {
-            *current = snapshot;
-            true
-        }
-    });
-}
-
 impl crate::Runtime for FakeRuntime {
     fn subscribe(&self) -> watch::Receiver<Snapshot> {
         self.tx.subscribe()
     }
 
-    fn command(&self, command: Command) -> Option<ActionOutcome> {
-        let (reply, result) = mpsc::channel();
-        let commands = self.commands.lock().unwrap();
-        commands.as_ref()?.send((command, reply)).ok()?;
-        drop(commands);
-        result.recv().ok().flatten()
+    fn command(&self, command: Command) -> bool {
+        let (reply, acknowledged) = mpsc::channel();
+        let sent = self
+            .commands
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|commands| commands.send((command, reply)).is_ok());
+        sent && acknowledged.recv().is_ok()
     }
 
     fn shutdown(&self) {
-        // End the worker thread; the process is on its way out.
-        self.stop.store(true, Ordering::Relaxed);
+        // Dropping the sender ends the worker thread.
         self.commands.lock().unwrap().take();
     }
 }

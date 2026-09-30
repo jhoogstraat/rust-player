@@ -13,7 +13,7 @@ pub(crate) struct CommandDispatcher {
 
 impl CommandDispatcher {
     pub(crate) fn new(runtime: Arc<dyn Runtime>) -> Self {
-        Self::with_handler(move |command| runtime.command(command).is_some())
+        Self::with_handler(move |command| runtime.command(command))
     }
 
     fn with_handler(handler: impl Fn(Command) -> bool + Send + 'static) -> Self {
@@ -50,15 +50,6 @@ impl CommandDispatcher {
         self.sender.lock().unwrap().take();
         if let Some(worker) = self.worker.lock().unwrap().take() {
             worker.join().expect("command dispatcher panicked");
-        }
-    }
-}
-
-impl Drop for CommandDispatcher {
-    fn drop(&mut self) {
-        self.sender.get_mut().unwrap().take();
-        if let Some(worker) = self.worker.get_mut().unwrap().take() {
-            let _ = worker.join();
         }
     }
 }

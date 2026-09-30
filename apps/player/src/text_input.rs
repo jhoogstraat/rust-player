@@ -7,7 +7,7 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
-const MUTED: u32 = 0x8b8b91;
+use crate::{MUTED, TEXT};
 
 fn is_command_chord(stroke: &gpui::Keystroke) -> bool {
     stroke.modifiers.platform
@@ -152,16 +152,8 @@ impl TextField {
             .flex()
             .items_center()
             .text_size(px(13.))
-            .text_color(if focused { rgb(0xf4f4f5) } else { rgb(MUTED) })
+            .text_color(if focused { rgb(TEXT) } else { rgb(MUTED) })
             .child(display)
-    }
-
-    pub fn render_search(
-        &self,
-        id: &'static str,
-        window: &gpui::Window,
-    ) -> impl IntoElement + use<> {
-        self.render(id, window)
     }
 }
 

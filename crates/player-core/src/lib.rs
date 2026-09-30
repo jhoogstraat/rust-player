@@ -3,9 +3,9 @@
 //! Everything the version-one window renders or sends lives here: one
 //! snapshot value type the runtime publishes, one command vocabulary it
 //! sends, and a runtime trait shared by the real Spotatui adapter and a
-//! scripted fake. Folded commands return an [`ActionOutcome`] only after the
-//! Event Spine applies them; pre-boot onboarding may return `Accepted` because
-//! it has no live fold yet. Failures arrive later as notices in a snapshot.
+//! scripted fake. A command is acknowledged only after the Event Spine applies
+//! it; pre-boot sign-in is acknowledged on hand-off because it has no live
+//! fold yet. Failures arrive later as notices in a snapshot.
 //!
 //! This crate depends on nothing heavier than `tokio::sync`.
 
@@ -199,13 +199,6 @@ pub struct PlaybackList {
     pub current_index: usize,
 }
 
-impl PlaybackList {
-    /// Return the currently selected track, if the list is valid and non-empty.
-    pub fn current(&self) -> Option<&Playable> {
-        self.tracks.get(self.current_index)
-    }
-}
-
 /// A library section the navigation sidebar can browse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LibrarySection {
@@ -230,9 +223,6 @@ impl LibrarySection {
 pub enum LibraryEntry {
     Track {
         playable: Playable,
-        /// When the track was played (Unix millis); `Some` only where the
-        /// section has a time dimension (Recently played).
-        played_at_ms: Option<u64>,
     },
     Playlist {
         /// Opaque source-owned playlist identity.
@@ -299,7 +289,7 @@ pub enum SearchState {
 
 /// The active Playable and where it stands. `position_ms` paired with
 /// `observed_at` is authoritative at publish time; while playing, the UI
-/// projects locally between snapshots on presentation animation frames.
+/// projects locally between snapshots on its own timer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaybackStatus {
     pub playable: Playable,
@@ -327,13 +317,6 @@ pub enum AudioState {
     Unavailable { message: String },
 }
 
-/// The current error message, if any, with whether it can be dismissed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Notice {
-    pub message: String,
-    pub dismissible: bool,
-}
-
 /// One immutable runtime state containing the fields every version-one user
 /// story needs. Catalog Availability shows up as `SearchState::Failed` plus
 /// `notice`; Playback Health as `audio`.
@@ -350,7 +333,8 @@ pub struct Snapshot {
     /// Listing for the section the sidebar last asked to browse.
     pub library: LibraryState,
     pub audio: AudioState,
-    pub notice: Option<Notice>,
+    /// The current status or error message; `Command::DismissNotice` clears it.
+    pub notice: Option<String>,
 }
 
 impl Default for Snapshot {
@@ -373,13 +357,6 @@ impl Default for Snapshot {
 }
 
 impl Snapshot {
-    /// The visible position right now, projected locally between snapshots.
-    /// While playing this advances smoothly; each new snapshot snaps back to
-    /// the authoritative `position_ms`.
-    pub fn projected_position_ms(&self, now: Instant) -> Option<u64> {
-        self.playback.as_ref().map(|p| project_position(p, now))
-    }
-
     /// Whether the active transport should currently produce sound.
     pub fn is_playing(&self) -> bool {
         self.playback.as_ref().is_some_and(|p| p.is_playing)
@@ -402,19 +379,7 @@ pub fn project_position(playback: &PlaybackStatus, now: Instant) -> u64 {
     }
 }
 
-/// What applying a [`Command`] produced after the Runtime folded it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionOutcome {
-    /// The command was accepted and folded; nothing further to report.
-    Applied,
-    /// Accepted by a pre-boot channel that has no fold to acknowledge yet.
-    Accepted,
-    /// A batch queue operation reports how many Playables were accepted.
-    Queued { accepted: usize },
-}
-
-/// Listener intent. The Runtime returns an outcome only after the command has
-/// been folded in event order; `None` means it was rejected before folding.
+/// Listener intent.
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Complete the sign-in fallback when the callback listener could not bind.
@@ -453,10 +418,10 @@ pub trait Runtime: Send + Sync + 'static {
     /// Subscribe to immutable snapshots; the current state arrives immediately.
     fn subscribe(&self) -> watch::Receiver<Snapshot>;
 
-    /// Send one command. The outcome is returned after the fold applies it;
-    /// failures surface later as notices. `None` means the command could not
-    /// be accepted (for example, an invalid list index or a closed runtime).
-    fn command(&self, command: Command) -> Option<ActionOutcome>;
+    /// Send one command. Returns after the fold applies it, in event order;
+    /// failures surface later as notices. `false` means the command was not
+    /// accepted (for example, an invalid list index or a closed runtime).
+    fn command(&self, command: Command) -> bool;
 
     /// Stop playback and flush state cleanly. Blocks until done. Callable
     /// through a shared handle (the application's quit hook).
