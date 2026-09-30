@@ -13,3 +13,11 @@ gpui.workspace = true
 gpui_platform.workspace = true
 player-core.workspace = true
 player-spotatui.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+raw-window-handle = "0.6"
+
+# `objc`'s `msg_send!` expands to a cfg this crate does not declare.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

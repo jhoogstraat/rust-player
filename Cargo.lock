@@ -5938,8 +5938,10 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "log",
+ "objc",
  "player-core",
  "player-spotatui",
+ "raw-window-handle",
 ]
 
 [[package]]

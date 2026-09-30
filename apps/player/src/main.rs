@@ -9,6 +9,8 @@ mod command_dispatch;
 mod icons;
 mod library;
 mod logging;
+#[cfg(target_os = "macos")]
+mod macos_blur;
 mod now_playing;
 mod sidebar;
 mod text_input;
@@ -1712,6 +1714,8 @@ fn open_player_window(cx: &mut App) {
             } else {
                 WindowBackgroundAppearance::Opaque
             },
+            #[cfg(target_os = "macos")]
+            macos_blur::restore(window);
             app_id: Some("rust-player".into()),
             ..Default::default()
         },
