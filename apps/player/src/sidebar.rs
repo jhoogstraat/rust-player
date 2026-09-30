@@ -10,7 +10,7 @@ use gpui::{
 use player_core::{Command, LibrarySection};
 
 use crate::{MUTED, rgb};
-use crate::{PANEL, PlayerApp, TEXT, border, icons, tone, wash};
+use crate::{PlayerApp, TEXT, border, icons, wash};
 
 /// Fixed sidebar width (Comet's default).
 pub(crate) const SIDEBAR_WIDTH: f32 = 256.0;
@@ -70,7 +70,7 @@ pub(crate) fn render_sidebar(app: &PlayerApp, cx: &mut Context<PlayerApp>) -> im
         .flex_none()
         .flex()
         .flex_col()
-        .bg(tone(PANEL, 0.45))
+        .bg(wash(0.05))
         .border_r_1()
         .border_color(border())
         .px(px(8.0))

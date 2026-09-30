@@ -14,7 +14,7 @@ use gpui::{
 };
 use player_core::{AudioState, LoginState, Playable, PlaybackDevice, PlaybackStatus, Snapshot};
 
-use crate::{ACCENT, MUTED, Performance, border, clock, small_button, tone};
+use crate::{ACCENT, MUTED, Performance, border, clock, small_button, wash};
 
 /// The shortest wait between progress updates, used while the window is focused.
 const FOCUSED_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
@@ -250,7 +250,7 @@ impl gpui::Render for NowPlaying {
             .border_color(border())
             .h(px(40.))
             .relative()
-            .bg(tone(0x232328, 0.75))
+            .bg(wash(0.10))
             .child(
                 div()
                     .absolute()

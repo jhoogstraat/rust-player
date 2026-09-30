@@ -148,7 +148,7 @@ impl TextField {
             .rounded(px(7.))
             .border_1()
             .border_color(crate::border())
-            .bg(crate::tone(0x111114, 0.50))
+            .bg(crate::wash(0.02))
             .flex()
             .items_center()
             .text_size(px(13.))

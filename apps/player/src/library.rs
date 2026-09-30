@@ -14,7 +14,7 @@ use player_core::{
     Command, LibraryEntry, LibrarySection, LibraryState, PlaybackList, SearchTarget,
 };
 
-use crate::{ACCENT, MUTED, PANEL, PlayerApp, border, clock, rgb, tone};
+use crate::{ACCENT, MUTED, PlayerApp, border, clock, rgb, wash};
 
 /// The listing never collapses below a readable table width.
 pub(crate) const LIBRARY_MIN_WIDTH: f32 = 300.0;
@@ -154,7 +154,7 @@ pub(crate) fn track_row(
         .justify_between()
         .gap(px(10.0))
         .cursor_pointer()
-        .hover(|style| style.bg(tone(PANEL, 0.60)))
+        .hover(|style| style.bg(wash(0.05)))
         .on_click(cx.listener(move |app, _, _, cx| {
             app.begin_playback(pending_playable.clone(), play_command.clone(), cx);
         }))
@@ -258,7 +258,7 @@ fn playlist_row(
         .items_center()
         .justify_between()
         .cursor_pointer()
-        .hover(|style| style.bg(tone(PANEL, 0.60)))
+        .hover(|style| style.bg(wash(0.05)))
         .on_click(cx.listener(move |app, _, _, cx| {
             app.open_search_target(target.clone(), cx);
         }))

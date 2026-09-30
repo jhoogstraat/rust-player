@@ -773,7 +773,7 @@ impl Render for PlayerApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(tone(BG, 0.80))
+            .bg(tone(BG, 0.70))
             .text_color(rgb(TEXT))
             // Body: sign-in takes the whole window until the runtime is
             // ready; then the Comet column layout — fixed sidebar, second
@@ -817,7 +817,7 @@ impl Render for PlayerApp {
                 div()
                     .px(px(18.))
                     .py(px(6.))
-                    .bg(tone(PANEL, 0.60))
+                    .bg(wash(0.05))
                     .border_t_1()
                     .border_color(border())
                     .flex()
@@ -931,7 +931,7 @@ impl PlayerApp {
                 .w(px(520.))
                 .p(px(28.))
                 .rounded(px(14.))
-                .bg(tone(PANEL, 0.60))
+                .bg(wash(0.05))
                 .border_1()
                 .border_color(border())
                 .flex()
@@ -1208,9 +1208,7 @@ impl PlayerApp {
                                                             .whitespace_nowrap()
                                                             .truncate()
                                                             .cursor_pointer()
-                                                            .hover(|style| {
-                                                                style.bg(tone(PANEL, 0.60))
-                                                            })
+                                                            .hover(|style| style.bg(wash(0.05)))
                                                             .on_click(cx.listener(
                                                                 move |app, _, _, cx| {
                                                                     app.open_search_target(
@@ -1256,9 +1254,7 @@ impl PlayerApp {
                                                             .items_center()
                                                             .text_size(px(13.))
                                                             .cursor_pointer()
-                                                            .hover(|style| {
-                                                                style.bg(tone(PANEL, 0.60))
-                                                            })
+                                                            .hover(|style| style.bg(wash(0.05)))
                                                             .on_click(cx.listener(
                                                                 move |app, _, _, cx| {
                                                                     app.open_search_target(
@@ -1510,7 +1506,7 @@ fn status_row_with_retry(text: String, query: String, cx: &Context<PlayerApp>) -
                 .text_size(px(11.))
                 .text_color(rgb(TEXT))
                 .cursor_pointer()
-                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                .hover(|style| style.bg(wash(0.05)))
                 .on_click(cx.listener(move |app, _, _, _| {
                     app.send(Command::Search(query.clone()));
                 }))
@@ -1598,7 +1594,7 @@ fn album_row(id: String, album: &SearchAlbum, cx: &Context<PlayerApp>) -> AnyEle
             .flex()
             .items_center()
             .cursor_pointer()
-            .hover(|style| style.bg(tone(PANEL, 0.60)))
+            .hover(|style| style.bg(wash(0.05)))
             .on_click(cx.listener(move |app, _, _, cx| {
                 app.open_search_target(target.clone(), cx);
             }))
@@ -1654,12 +1650,12 @@ fn button(
         .flex()
         .items_center()
         .justify_center()
-        .bg(tone(PANEL, 0.60))
+        .bg(wash(0.05))
         .border_1()
         .border_color(border())
         .text_size(px(12.))
         .cursor_pointer()
-        .hover(|style| style.bg(tone(0x232328, 0.75)))
+        .hover(|style| style.bg(wash(0.10)))
         .on_click(handler)
         .child(label)
 }
@@ -1682,7 +1678,7 @@ fn small_button(
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(|style| style.bg(tone(PANEL, 0.60)))
+                .hover(|style| style.bg(wash(0.05)))
                 .on_click(handler)
         })
         .child(label)
@@ -1714,12 +1710,12 @@ fn open_player_window(cx: &mut App) {
             } else {
                 WindowBackgroundAppearance::Opaque
             },
-            #[cfg(target_os = "macos")]
-            macos_blur::restore(window);
             app_id: Some("rust-player".into()),
             ..Default::default()
         },
         |window, cx| {
+            #[cfg(target_os = "macos")]
+            macos_blur::restore(window);
             let mut rx = runtime.subscribe();
             let now_playing = cx
                 .new(|cx| now_playing::NowPlaying::new(&initial_snapshot, performance.clone(), cx));
