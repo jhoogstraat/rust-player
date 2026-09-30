@@ -33,7 +33,7 @@ impl PlaybackListProjector {
                     query: query.clone(),
                 },
                 *revision,
-                &results.tracks,
+                Arc::clone(&results.tracks),
             ),
             SearchState::Idle | SearchState::Loading { .. } | SearchState::Failed { .. } => {
                 self.clear()
@@ -98,7 +98,7 @@ impl PlaybackListProjector {
             ),
             _ => return self.clear(),
         };
-        self.project(source, revision, tracks)
+        self.project(source, revision, Arc::clone(tracks))
     }
 
     /// Derive a candidate from a library listing, or clear it when its catalog
@@ -129,8 +129,8 @@ impl PlaybackListProjector {
                 LibraryEntry::Track { playable, .. } => Some(playable.clone()),
                 LibraryEntry::Playlist { .. } => None,
             })
-            .collect::<Vec<_>>();
-        self.project(source, *revision, &tracks)
+            .collect();
+        self.project(source, *revision, tracks)
     }
 
     /// Clear the candidate cache. This never changes a selected Playback List.
@@ -143,7 +143,7 @@ impl PlaybackListProjector {
         &mut self,
         source: PlaybackListSource,
         revision: CatalogRevision,
-        tracks: &[Playable],
+        tracks: Arc<[Playable]>,
     ) -> Option<Arc<PlaybackList>> {
         if tracks.is_empty() {
             return self.clear();
@@ -156,7 +156,7 @@ impl PlaybackListProjector {
         }
         let list = Arc::new(PlaybackList {
             source: source.clone(),
-            tracks: tracks.to_vec().into(),
+            tracks,
             current_index: 0,
         });
         self.cached = Some(CachedCandidate {

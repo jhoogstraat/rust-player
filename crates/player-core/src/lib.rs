@@ -219,7 +219,7 @@ impl LibrarySection {
 }
 
 /// One row of a library listing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryEntry {
     Track {
         playable: Playable,
@@ -236,7 +236,7 @@ pub enum LibraryEntry {
 /// [`SearchState`]: the visible listing is always replaced by `Loading` or
 /// `Failed` before new rows land, so nothing on screen pretends to be
 /// current. One section is browsed at a time (ADR 0011).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LibraryState {
     #[default]
     Idle,
